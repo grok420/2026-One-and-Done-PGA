@@ -20,9 +20,14 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
-from .config import get_config, SCRAPER_SELECTORS
-from .database import Database
-from .models import LeagueStanding, OpponentPick, Pick
+try:
+    from .config import get_config, SCRAPER_SELECTORS
+    from .database import Database
+    from .models import LeagueStanding, OpponentPick, Pick
+except ImportError:
+    from config import get_config, SCRAPER_SELECTORS
+    from database import Database
+    from models import LeagueStanding, OpponentPick, Pick
 
 logger = logging.getLogger(__name__)
 

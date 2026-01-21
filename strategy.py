@@ -11,17 +11,27 @@ from collections import defaultdict
 import numpy as np
 from sklearn.cluster import KMeans
 
-from .config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events
-from .database import Database
-from .models import (
-    Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
-    SimulationResult, LeagueStanding
-)
+try:
+    from .config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events
+    from .database import Database
+    from .models import (
+        Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
+        SimulationResult, LeagueStanding
+    )
+    from .simulator import Simulator
+    from .api import DataGolfAPI
+except ImportError:
+    from config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events
+    from database import Database
+    from models import (
+        Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
+        SimulationResult, LeagueStanding
+    )
+    from simulator import Simulator
+    from api import DataGolfAPI
 
 # OWGR threshold for warnings - last year's winner never picked outside top 65
 OWGR_WARNING_THRESHOLD = 65
-from .simulator import Simulator
-from .api import DataGolfAPI
 
 logger = logging.getLogger(__name__)
 

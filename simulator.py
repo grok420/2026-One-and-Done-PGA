@@ -10,12 +10,20 @@ from datetime import datetime
 
 import numpy as np
 
-from .config import get_config, PAYOUT_DISTRIBUTION, DEFAULT_FIELD_SIZE
-from .database import Database
-from .models import (
-    Tournament, Golfer, SimulationResult, WhatIfScenario,
-    Recommendation, SeasonPlan, Tier, CutRule
-)
+try:
+    from .config import get_config, PAYOUT_DISTRIBUTION, DEFAULT_FIELD_SIZE
+    from .database import Database
+    from .models import (
+        Tournament, Golfer, SimulationResult, WhatIfScenario,
+        Recommendation, SeasonPlan, Tier, CutRule
+    )
+except ImportError:
+    from config import get_config, PAYOUT_DISTRIBUTION, DEFAULT_FIELD_SIZE
+    from database import Database
+    from models import (
+        Tournament, Golfer, SimulationResult, WhatIfScenario,
+        Recommendation, SeasonPlan, Tier, CutRule
+    )
 
 logger = logging.getLogger(__name__)
 

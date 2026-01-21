@@ -10,9 +10,14 @@ from dataclasses import dataclass
 
 import requests
 
-from .config import get_config
-from .database import Database
-from .models import Golfer, GolferStats, ApproachBuckets
+try:
+    from .config import get_config
+    from .database import Database
+    from .models import Golfer, GolferStats, ApproachBuckets
+except ImportError:
+    from config import get_config
+    from database import Database
+    from models import Golfer, GolferStats, ApproachBuckets
 
 logger = logging.getLogger(__name__)
 

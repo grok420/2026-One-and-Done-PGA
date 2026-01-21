@@ -11,7 +11,10 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-from .models import Tournament, Tier, CutRule
+try:
+    from .models import Tournament, Tier, CutRule
+except ImportError:
+    from models import Tournament, Tier, CutRule
 
 
 # Load environment variables from .env file

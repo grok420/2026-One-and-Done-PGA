@@ -10,11 +10,18 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from contextlib import contextmanager
 
-from .models import (
-    Tournament, Golfer, GolferStats, Pick, LeagueStanding,
-    OpponentPick, SimulationResult, Tier
-)
-from .config import get_config
+try:
+    from .models import (
+        Tournament, Golfer, GolferStats, Pick, LeagueStanding,
+        OpponentPick, SimulationResult, Tier
+    )
+    from .config import get_config
+except ImportError:
+    from models import (
+        Tournament, Golfer, GolferStats, Pick, LeagueStanding,
+        OpponentPick, SimulationResult, Tier
+    )
+    from config import get_config
 
 
 class Database:
