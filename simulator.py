@@ -10,11 +10,11 @@ from datetime import datetime
 
 import numpy as np
 
-from .config import get_config, PAYOUT_DISTRIBUTION
+from .config import get_config, PAYOUT_DISTRIBUTION, DEFAULT_FIELD_SIZE
 from .database import Database
 from .models import (
     Tournament, Golfer, SimulationResult, WhatIfScenario,
-    Recommendation, SeasonPlan, Tier
+    Recommendation, SeasonPlan, Tier, CutRule
 )
 
 logger = logging.getLogger(__name__)
@@ -36,11 +36,13 @@ class Simulator:
         top_10_prob: float,
         top_20_prob: float,
         make_cut_prob: float,
-        field_size: int = 156
+        field_size: int = 144,
+        has_cut: bool = True
     ) -> int:
         """
         Generate a random finish position based on probabilities.
         Returns position (1-based) or 0 for missed cut.
+        For no-cut events, everyone finishes (no 0 returns).
         """
         roll = self._rng.random()
 
@@ -61,14 +63,17 @@ class Simulator:
         if roll < top_20_prob:
             return self._rng.integers(11, 21)
 
-        # Made cut but worse than 20th
-        if roll < make_cut_prob:
-            return self._rng.integers(21, 71)  # Typical cut line around 70
+        # Made cut but worse than 20th (or no-cut event)
+        if has_cut:
+            if roll < make_cut_prob:
+                return self._rng.integers(21, 71)  # Typical cut line around 70
+            # Missed cut
+            return 0
+        else:
+            # No-cut event: everyone finishes, distribute across field
+            return self._rng.integers(21, field_size + 1)
 
-        # Missed cut
-        return 0
-
-    def _calculate_payout(self, position: int, purse: int) -> int:
+    def _calculate_payout(self, position: int, purse: int, has_cut: bool = True, field_size: int = 144) -> int:
         """Calculate payout for a finish position."""
         if position == 0:
             return 0  # Missed cut
@@ -78,6 +83,14 @@ class Simulator:
         elif position <= 70:
             # Extrapolate for positions not in table
             return int(purse * 0.004)  # ~$40K on $10M purse
+        elif not has_cut and position <= field_size:
+            # No-cut event: everyone gets paid, last place gets ~0.3%
+            # Scale down from position 70 to field_size
+            min_payout_pct = 0.003
+            mid_payout_pct = 0.004
+            # Linear interpolation
+            pct = mid_payout_pct - ((position - 70) / (field_size - 70)) * (mid_payout_pct - min_payout_pct)
+            return int(purse * max(pct, min_payout_pct))
         return 0
 
     def simulate_tournament(
@@ -113,6 +126,10 @@ class Simulator:
             top_20_prob = golfer.top_20_probability or top_10_prob * 1.8
             make_cut_prob = golfer.make_cut_probability or self._owgr_to_cut_prob(golfer.owgr)
 
+        # Get tournament cut info
+        has_cut = tournament.has_cut
+        field_size = tournament.field_size
+
         # Run simulations
         earnings = np.zeros(n)
         wins = 0
@@ -121,9 +138,13 @@ class Simulator:
 
         for i in range(n):
             position = self._generate_finish_position(
-                win_prob, top_10_prob, top_20_prob, make_cut_prob
+                win_prob, top_10_prob, top_20_prob, make_cut_prob,
+                field_size=field_size, has_cut=has_cut
             )
-            payout = self._calculate_payout(position, tournament.purse)
+            payout = self._calculate_payout(
+                position, tournament.purse,
+                has_cut=has_cut, field_size=field_size
+            )
             earnings[i] = payout
 
             if position == 1:

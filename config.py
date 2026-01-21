@@ -11,11 +11,17 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-from .models import Tournament, Tier
+from .models import Tournament, Tier, CutRule
 
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+# Field size constants (updated for 2026)
+DEFAULT_FIELD_SIZE = 144  # Down from 156
+SIGNATURE_FIELD_SIZE = 70  # Signature events have smaller fields
+NO_CUT_FIELD_SIZE = 70  # No-cut events
 
 
 @dataclass
@@ -125,6 +131,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="Pebble Beach Golf Links",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.NO_CUT,  # No-cut signature event
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
     Tournament(
         name="Genesis Invitational",
@@ -133,6 +141,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="Riviera Country Club",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.TOP_50_TIES,  # 36-hole cut to top 50+ties
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
     Tournament(
         name="Cognizant Classic",
@@ -150,6 +160,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="Bay Hill Club",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.TOP_50_TIES,  # 36-hole cut to top 50+ties
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
     Tournament(
         name="Puerto Rico Open",
@@ -166,6 +178,7 @@ SCHEDULE_2026: List[Tournament] = [
         course="TPC Sawgrass",
         tier=Tier.TIER_1,
         is_signature=True,
+        field_size=144,  # The Players has larger field
     ),
     Tournament(
         name="Valspar Championship",
@@ -205,6 +218,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="Harbour Town Golf Links",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.NO_CUT,  # No-cut signature event
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
     Tournament(
         name="Zurich Classic of New Orleans",
@@ -213,16 +228,17 @@ SCHEDULE_2026: List[Tournament] = [
         course="TPC Louisiana",
         tier=Tier.TIER_2,
     ),
+    # May
     Tournament(
-        name="Cadillac Championship",
-        date=date(2026, 4, 30),
+        name="Miami Championship",
+        date=date(2026, 5, 1),
         purse=20_000_000,
         course="Trump National Doral",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.NO_CUT,  # No-cut signature event (NEW for 2026)
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
-
-    # May
     Tournament(
         name="Truist Championship",
         date=date(2026, 5, 7),
@@ -230,6 +246,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="Quail Hollow Club",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.NO_CUT,  # No-cut signature event
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
     Tournament(
         name="Myrtle Beach Classic",
@@ -270,6 +288,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="Muirfield Village",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.TOP_50_TIES,  # 36-hole cut to top 50+ties
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
     Tournament(
         name="RBC Canadian Open",
@@ -293,6 +313,8 @@ SCHEDULE_2026: List[Tournament] = [
         course="TPC River Highlands",
         tier=Tier.TIER_1,
         is_signature=True,
+        cut_rule=CutRule.NO_CUT,  # No-cut signature event
+        field_size=SIGNATURE_FIELD_SIZE,
     ),
 
     # July
@@ -380,14 +402,72 @@ SCHEDULE_2026: List[Tournament] = [
         course="East Lake Golf Club",
         tier=Tier.TIER_1,
         is_playoff=True,
+        cut_rule=CutRule.NO_CUT,  # Top 30 only, no cut
+        field_size=30,
     ),
 
-    # Fall (if included)
+    # FedEx Cup Fall Events (2026 purses)
+    Tournament(
+        name="Procore Championship",
+        date=date(2026, 9, 10),
+        purse=6_000_000,
+        course="Silverado Resort",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="Sanderson Farms Championship",
+        date=date(2026, 9, 24),
+        purse=6_000_000,
+        course="Country Club of Jackson",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="Shriners Children's Open",
+        date=date(2026, 10, 8),
+        purse=6_000_000,
+        course="TPC Summerlin",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="ZOZO Championship",
+        date=date(2026, 10, 15),
+        purse=6_000_000,
+        course="Accordia Golf Narashino",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="World Wide Technology Championship",
+        date=date(2026, 10, 29),
+        purse=6_000_000,
+        course="El Cardonal at Diamante",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="Butterfield Bermuda Championship",
+        date=date(2026, 11, 5),
+        purse=6_000_000,
+        course="Port Royal Golf Course",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="Baycurrent Classic",
+        date=date(2026, 11, 12),
+        purse=8_000_000,
+        course="TBD",
+        tier=Tier.TIER_2,
+    ),
     Tournament(
         name="The RSM Classic",
         date=date(2026, 11, 19),
         purse=7_400_000,
         course="Sea Island Golf Club",
+        tier=Tier.TIER_3,
+    ),
+    Tournament(
+        name="Biltmore Championship Asheville",
+        date=date(2026, 12, 3),
+        purse=5_000_000,
+        course="Biltmore Forest Country Club",
         tier=Tier.TIER_3,
     ),
 ]
@@ -448,6 +528,16 @@ def get_tier_3_events() -> List[Tournament]:
 def get_playoff_events() -> List[Tournament]:
     """Get FedEx playoff events."""
     return [t for t in SCHEDULE_2026 if t.is_playoff]
+
+
+def get_no_cut_events() -> List[Tournament]:
+    """Get all no-cut events (guaranteed earnings)."""
+    return [t for t in SCHEDULE_2026 if t.cut_rule == CutRule.NO_CUT]
+
+
+def get_fall_events() -> List[Tournament]:
+    """Get FedEx Cup Fall events (September-December)."""
+    return [t for t in SCHEDULE_2026 if t.date.month >= 9]
 
 
 def get_total_purse() -> int:

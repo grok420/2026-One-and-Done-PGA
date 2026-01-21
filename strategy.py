@@ -11,12 +11,15 @@ from collections import defaultdict
 import numpy as np
 from sklearn.cluster import KMeans
 
-from .config import get_config, get_schedule, get_next_tournament, get_majors
+from .config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events
 from .database import Database
 from .models import (
-    Tournament, Golfer, Recommendation, SeasonPhase, Tier,
+    Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
     SimulationResult, LeagueStanding
 )
+
+# OWGR threshold for warnings - last year's winner never picked outside top 65
+OWGR_WARNING_THRESHOLD = 65
 from .simulator import Simulator
 from .api import DataGolfAPI
 
@@ -56,6 +59,59 @@ class Strategy:
         else:
             return "longshot"
 
+    def check_owgr_warning(self, golfer: Golfer) -> Tuple[bool, str]:
+        """
+        Check if golfer has OWGR risk.
+        Last year's One and Done winner never picked anyone outside top 65 OWGR.
+        Returns (has_warning, warning_message).
+        """
+        if golfer.owgr > OWGR_WARNING_THRESHOLD:
+            return True, f"OWGR {golfer.owgr} is outside top {OWGR_WARNING_THRESHOLD} - historical winners avoid these picks"
+        return False, ""
+
+    def calculate_no_cut_ev(self, golfer: Golfer, tournament: Tournament) -> float:
+        """
+        Calculate EV for no-cut events where everyone gets paid.
+        No-cut events favor higher-variance picks since there's a guaranteed floor.
+        """
+        if tournament.has_cut:
+            return 0  # Use standard EV calculation for cut events
+
+        # Get simulation result
+        sim_result = self.simulator.simulate_tournament(golfer, tournament)
+
+        # In no-cut events, minimum payout is guaranteed
+        min_payout = tournament.min_payout
+
+        # Adjusted EV = max(mean_earnings, min_payout) for the floor
+        # But also boost value of high-upside players since no cut risk
+        base_ev = max(sim_result.mean_earnings, min_payout)
+
+        # Upside boost: in no-cut events, high-variance is more valuable
+        # because there's no downside of $0 (missed cut)
+        variance_boost = (sim_result.percentile_90 - sim_result.mean_earnings) / tournament.purse
+        upside_adjustment = 1 + (variance_boost * 0.5)  # Up to 50% boost for high variance
+
+        return base_ev * upside_adjustment
+
+    def get_late_season_popularity_weight(self, target_date: date = None) -> float:
+        """
+        Calculate popularity weighting factor for late season.
+        More important to differentiate from opponents as season progresses.
+        Returns multiplier for hedge bonus (1.0 to 2.0).
+        """
+        target_date = target_date or date.today()
+        month = target_date.month
+
+        if month >= 8:  # August playoffs
+            return 2.0  # Double the hedge bonus importance
+        elif month >= 6:  # June-July
+            return 1.5
+        elif month >= 4:  # April-May (majors season)
+            return 1.25
+        else:  # Early season
+            return 1.0
+
     def get_opponent_usage_stats(self) -> Dict[str, Dict]:
         """Analyze opponent usage patterns."""
         all_picks = self.db.get_opponent_picks()
@@ -74,23 +130,37 @@ class Strategy:
             }
         return stats
 
-    def calculate_hedge_bonus(self, golfer_name: str, league_size: int = 80) -> float:
+    def calculate_hedge_bonus(
+        self,
+        golfer_name: str,
+        league_size: int = 80,
+        target_date: date = None
+    ) -> float:
         """
         Calculate differentiation bonus for picking an underused golfer.
         Higher bonus = golfer used by fewer opponents.
+        Bonus increases in importance as season progresses.
         """
         usage = self.db.get_golfer_usage_count(golfer_name)
         pct_available = (league_size - usage) / league_size
 
-        # Bonus scales with scarcity
+        # Base bonus scales with scarcity
         if pct_available >= 0.95:  # Almost nobody has used
-            return 1.15  # 15% bonus
+            base_bonus = 1.15  # 15% bonus
         elif pct_available >= 0.80:
-            return 1.08
+            base_bonus = 1.08
         elif pct_available >= 0.50:
-            return 1.02
+            base_bonus = 1.02
         else:
-            return 1.0  # No bonus for commonly used golfers
+            base_bonus = 1.0  # No bonus for commonly used golfers
+
+        # Apply late-season multiplier (hedge becomes more important)
+        late_season_mult = self.get_late_season_popularity_weight(target_date)
+        # Scale the bonus portion by the multiplier
+        bonus_portion = base_bonus - 1.0
+        adjusted_bonus = 1.0 + (bonus_portion * late_season_mult)
+
+        return adjusted_bonus
 
     def calculate_regret_risk(
         self,
@@ -182,8 +252,8 @@ class Strategy:
             top_10_ev = tournament.get_payout(5) * golfer.top_10_probability  # Avg top-10 payout
             cut_ev = tournament.get_payout(40) * golfer.make_cut_probability  # Avg make-cut
 
-            # Calculate hedge bonus
-            hedge_bonus = self.calculate_hedge_bonus(golfer.name, league_size)
+            # Calculate hedge bonus with late-season weighting
+            hedge_bonus = self.calculate_hedge_bonus(golfer.name, league_size, tournament.date)
 
             # Calculate regret risk (vs other available golfers)
             other_golfers = [g for g in golfers if g.name != golfer.name][:5]
@@ -192,16 +262,33 @@ class Strategy:
             # Apply phase-specific adjustments
             phase_multiplier = self._get_phase_multiplier(golfer, tournament, phase)
 
-            # Final EV with hedge bonus
-            expected_value = sim_result.mean_earnings * hedge_bonus * phase_multiplier
+            # Calculate expected value based on cut rule
+            if not tournament.has_cut:
+                # No-cut event: use special EV calculation
+                base_ev = self.calculate_no_cut_ev(golfer, tournament)
+            else:
+                base_ev = sim_result.mean_earnings
 
-            # Build reasoning
+            # Final EV with hedge bonus and phase multiplier
+            expected_value = base_ev * hedge_bonus * phase_multiplier
+
+            # Check OWGR warning
+            owgr_warning, owgr_msg = self.check_owgr_warning(golfer)
+
+            # Build reasoning (include OWGR warning if applicable)
             reasoning = self._build_reasoning(
                 golfer, tournament, sim_result, hedge_bonus, phase, regret_risk
             )
+            if owgr_warning:
+                reasoning = f"WARNING: {owgr_msg} | {reasoning}"
 
-            # Confidence score (0-1)
+            # Confidence score (0-1) - reduce for OWGR warning
             confidence = self._calculate_confidence(golfer, sim_result)
+            if owgr_warning:
+                confidence *= 0.8  # 20% confidence penalty for OWGR risk
+
+            # Course fit bonus display
+            course_fit = golfer.course_fit_adjustment
 
             rec = Recommendation(
                 golfer=golfer,
@@ -214,6 +301,8 @@ class Strategy:
                 hedge_bonus=hedge_bonus - 1.0,  # Store as bonus amount
                 regret_risk=regret_risk,
                 reasoning=reasoning,
+                course_fit_sg=course_fit,
+                owgr_warning=owgr_warning,
             )
             recommendations.append(rec)
 
@@ -285,11 +374,21 @@ class Strategy:
         parts.append(f"EV: ${sim.mean_earnings:,.0f}")
         parts.append(f"Win: {sim.win_rate*100:.1f}%")
         parts.append(f"Top-10: {sim.top_10_rate*100:.1f}%")
-        parts.append(f"Cut: {sim.cut_rate*100:.0f}%")
+
+        # Cut info varies by event type
+        if not tournament.has_cut:
+            parts.append(f"NO-CUT (Min: ${tournament.min_payout:,.0f})")
+        else:
+            parts.append(f"Cut: {sim.cut_rate*100:.0f}%")
 
         # Tier and phase
         tier = self.classify_golfer_tier(golfer)
         parts.append(f"[{tier.upper()}]")
+
+        # Course fit
+        if golfer.course_fit_adjustment != 0:
+            fit_dir = "+" if golfer.course_fit_adjustment > 0 else ""
+            parts.append(f"Fit: {fit_dir}{golfer.course_fit_adjustment:.2f} SG/rd")
 
         # Hedge bonus
         if hedge > 1.05:

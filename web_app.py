@@ -16,12 +16,12 @@ from pathlib import Path
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import get_config, get_schedule, get_next_tournament, get_majors, get_tournament_by_name
+from config import get_config, get_schedule, get_next_tournament, get_majors, get_tournament_by_name, get_no_cut_events
 from database import Database
 from api import DataGolfAPI
 from simulator import Simulator
 from strategy import Strategy
-from models import Tier
+from models import Tier, CutRule
 
 # Page config
 st.set_page_config(
@@ -94,7 +94,7 @@ def main():
 
     page = st.sidebar.radio(
         "Select Page",
-        ["Dashboard", "Pick Recommendations", "Tournament Schedule",
+        ["Dashboard", "Pick Recommendations", "Betting & Odds", "Tournament Schedule",
          "What-If Analysis", "Season Planner", "League Standings", "Settings"]
     )
 
@@ -102,6 +102,8 @@ def main():
         show_dashboard()
     elif page == "Pick Recommendations":
         show_recommendations()
+    elif page == "Betting & Odds":
+        show_betting_odds()
     elif page == "Tournament Schedule":
         show_schedule()
     elif page == "What-If Analysis":
@@ -209,15 +211,22 @@ def show_recommendations():
 
     # Tournament info card
     tier_emoji = {Tier.TIER_1: "", Tier.TIER_2: "", Tier.TIER_3: ""}
+    cut_info = "NO CUT" if not tournament.has_cut else f"Cut: {tournament.cut_rule.value.replace('_', ' ').title()}"
+
     st.info(f"""
     **{tournament.name}** {tier_emoji.get(tournament.tier, '')}
 
     **Date:** {tournament.date.strftime('%B %d, %Y')} |
     **Purse:** ${tournament.purse:,} |
     **Winner:** ${tournament.winner_share:,} |
-    **Tier:** {tournament.tier.name}
+    **Tier:** {tournament.tier.name} |
+    **{cut_info}**
     {"| **MAJOR**" if tournament.is_major else ""}{"| **SIGNATURE**" if tournament.is_signature else ""}
     """)
+
+    # No-cut event advisory
+    if not tournament.has_cut:
+        st.success(f"This is a NO-CUT event. All {tournament.field_size} players are guaranteed payment (min ${tournament.min_payout:,}). Higher-variance picks are favored.")
 
     # Number of recommendations
     num_recs = st.slider("Number of recommendations", 5, 20, 10)
@@ -266,11 +275,18 @@ def show_recommendations():
                     medal = f"#{i}"
                     color = "#4CAF50"
 
-                with st.expander(f"{medal} **{rec.golfer.name}** - EV: ${rec.expected_value:,.0f}", expanded=(i <= 3)):
+                # Show OWGR warning in the expander title if applicable
+                owgr_flag = " OWGR RISK" if rec.owgr_warning else ""
+                with st.expander(f"{medal} **{rec.golfer.name}** - EV: ${rec.expected_value:,.0f}{owgr_flag}", expanded=(i <= 3)):
+                    # OWGR Warning banner
+                    if rec.owgr_warning:
+                        st.error(f"OWGR Warning: Rank {rec.golfer.owgr} is outside top 65. Historical winners avoid these picks.")
+
                     col1, col2, col3, col4 = st.columns(4)
 
                     with col1:
                         st.metric("Expected Value", f"${rec.expected_value:,.0f}")
+                        owgr_color = "inverse" if rec.owgr_warning else "normal"
                         st.metric("OWGR", rec.golfer.owgr)
 
                     with col2:
@@ -281,13 +297,22 @@ def show_recommendations():
 
                     with col3:
                         cut_pct = sim.cut_rate * 100 if sim else 0
-                        st.metric("Cut %", f"{cut_pct:.0f}%")
+                        if tournament.has_cut:
+                            st.metric("Cut %", f"{cut_pct:.0f}%")
+                        else:
+                            st.metric("Guaranteed", "NO CUT")
                         st.metric("Confidence", f"{rec.confidence*100:.0f}%")
 
                     with col4:
                         if sim:
                             st.metric("Upside (90th)", f"${sim.percentile_90:,.0f}")
-                            st.metric("Downside (10th)", f"${sim.percentile_10:,.0f}")
+                            st.metric("Downside (10th)", f"${sim.percentile_10 if tournament.has_cut else tournament.min_payout:,.0f}")
+
+                    # Course Fit indicator
+                    if rec.course_fit_sg != 0:
+                        fit_color = "green" if rec.course_fit_sg > 0 else "red"
+                        fit_sign = "+" if rec.course_fit_sg > 0 else ""
+                        st.info(f"Course Fit: {fit_sign}{rec.course_fit_sg:.2f} SG/round (Data Golf adjustment)")
 
                     # Hedge bonus indicator
                     if rec.hedge_bonus > 0:
@@ -358,19 +383,27 @@ def show_recommendations():
             data = []
             for i, rec in enumerate(recs, 1):
                 sim = db.get_simulation(rec.golfer.name, tournament.name)
-                data.append({
+                row = {
                     "Rank": i,
                     "Golfer": rec.golfer.name,
                     "OWGR": rec.golfer.owgr,
                     "Expected Value": rec.expected_value,
                     "Win %": sim.win_rate * 100 if sim else 0,
                     "Top-10 %": sim.top_10_rate * 100 if sim else 0,
-                    "Cut %": sim.cut_rate * 100 if sim else 0,
+                }
+                if tournament.has_cut:
+                    row["Cut %"] = sim.cut_rate * 100 if sim else 0
+                else:
+                    row["Guaranteed"] = "YES"
+                row.update({
                     "Upside (90th)": sim.percentile_90 if sim else 0,
-                    "Downside (10th)": sim.percentile_10 if sim else 0,
+                    "Downside (10th)": sim.percentile_10 if sim else (tournament.min_payout if not tournament.has_cut else 0),
+                    "Course Fit": f"{rec.course_fit_sg:+.2f}" if rec.course_fit_sg else "-",
                     "Hedge Bonus": f"+{rec.hedge_bonus*100:.0f}%" if rec.hedge_bonus > 0 else "-",
-                    "Confidence": f"{rec.confidence*100:.0f}%"
+                    "Confidence": f"{rec.confidence*100:.0f}%",
+                    "OWGR Risk": "YES" if rec.owgr_warning else "-",
                 })
+                data.append(row)
 
             df = pd.DataFrame(data)
             st.dataframe(
@@ -394,6 +427,158 @@ def show_recommendations():
                 f"recommendations_{tournament.name.replace(' ', '_')}.csv",
                 "text/csv"
             )
+
+
+def show_betting_odds():
+    """Betting odds comparison and approach skill breakdown."""
+    st.title("Betting Odds & Player Analysis")
+
+    api = st.session_state.api
+
+    tab1, tab2, tab3 = st.tabs(["Betting Odds", "Approach Skills", "Course Fit"])
+
+    with tab1:
+        st.subheader("Betting Odds Comparison")
+        st.markdown("Compare Data Golf model predictions vs. market consensus from 11 sportsbooks.")
+
+        market = st.selectbox("Market", ["win", "top_5", "top_10", "top_20", "make_cut"])
+
+        if st.button("Fetch Betting Odds", key="fetch_odds"):
+            with st.spinner("Fetching odds from sportsbooks..."):
+                odds = api.get_betting_outrights(market=market)
+
+            if odds:
+                data = []
+                for golfer, books in odds.items():
+                    dg_prob = books.get("datagolf_model", 0) * 100
+                    consensus = books.get("consensus", 0) * 100
+                    if dg_prob > 0 or consensus > 0:
+                        # Value = DG model - market (positive = undervalued by market)
+                        value = dg_prob - consensus
+                        data.append({
+                            "Golfer": golfer,
+                            "DG Model %": dg_prob,
+                            "Market %": consensus,
+                            "Value": value,
+                            "Edge": "Undervalued" if value > 1 else ("Overvalued" if value < -1 else "Fair")
+                        })
+
+                df = pd.DataFrame(data)
+                df = df.sort_values("Value", ascending=False)
+
+                # Highlight value picks
+                st.dataframe(
+                    df.style.format({
+                        "DG Model %": "{:.2f}%",
+                        "Market %": "{:.2f}%",
+                        "Value": "{:+.2f}%"
+                    }).background_gradient(subset=["Value"], cmap="RdYlGn"),
+                    use_container_width=True,
+                    height=500
+                )
+
+                # Top value picks
+                st.subheader("Top Value Picks (Model > Market)")
+                top_value = df[df["Value"] > 0].head(10)
+                if not top_value.empty:
+                    for _, row in top_value.iterrows():
+                        st.success(f"**{row['Golfer']}**: DG Model {row['DG Model %']:.2f}% vs Market {row['Market %']:.2f}% (+{row['Value']:.2f}% edge)")
+            else:
+                st.warning("No betting odds available. Ensure API key is configured.")
+
+    with tab2:
+        st.subheader("Approach Skill by Yardage")
+        st.markdown("Player performance (strokes gained) broken down by approach distance.")
+
+        if st.button("Load Approach Skills", key="load_approach"):
+            with st.spinner("Fetching approach skill data..."):
+                approach_data = api.get_approach_skill()
+
+            if approach_data:
+                data = []
+                for golfer, buckets in approach_data.items():
+                    data.append({
+                        "Golfer": golfer,
+                        "50-100 yds": buckets.sg_50_100,
+                        "100-150 yds": buckets.sg_100_150,
+                        "150-200 yds": buckets.sg_150_200,
+                        "200+ yds": buckets.sg_200_plus,
+                        "Fairway": buckets.sg_fairway,
+                        "Rough": buckets.sg_rough,
+                    })
+
+                df = pd.DataFrame(data)
+
+                # Filter options
+                sort_by = st.selectbox("Sort by", ["50-100 yds", "100-150 yds", "150-200 yds", "200+ yds", "Fairway", "Rough"])
+                df = df.sort_values(sort_by, ascending=False)
+
+                st.dataframe(
+                    df.style.format({
+                        "50-100 yds": "{:.3f}",
+                        "100-150 yds": "{:.3f}",
+                        "150-200 yds": "{:.3f}",
+                        "200+ yds": "{:.3f}",
+                        "Fairway": "{:.3f}",
+                        "Rough": "{:.3f}",
+                    }).background_gradient(cmap="RdYlGn"),
+                    use_container_width=True,
+                    height=500
+                )
+
+                # Chart for top players
+                top_10 = df.head(10)
+                fig = go.Figure()
+                for col in ["50-100 yds", "100-150 yds", "150-200 yds", "200+ yds"]:
+                    fig.add_trace(go.Bar(name=col, x=top_10["Golfer"], y=top_10[col]))
+                fig.update_layout(
+                    title=f"Top 10 Players by {sort_by} - Approach Breakdown",
+                    barmode='group',
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No approach skill data available.")
+
+    with tab3:
+        st.subheader("Course Fit Adjustments")
+        st.markdown("How much a player gains/loses (SG/round) based on course fit for the current event.")
+
+        if st.button("Load Course Fit Data", key="load_fit"):
+            with st.spinner("Fetching course fit predictions..."):
+                fit_data = api.get_course_fit_predictions()
+
+            if fit_data:
+                data = []
+                for golfer, adjustment in fit_data.items():
+                    if adjustment != 0:
+                        data.append({
+                            "Golfer": golfer,
+                            "Course Fit (SG/round)": adjustment,
+                            "Impact": "Strong Positive" if adjustment > 0.3 else ("Positive" if adjustment > 0 else ("Negative" if adjustment > -0.3 else "Strong Negative"))
+                        })
+
+                df = pd.DataFrame(data)
+                df = df.sort_values("Course Fit (SG/round)", ascending=False)
+
+                st.dataframe(
+                    df.style.format({
+                        "Course Fit (SG/round)": "{:+.3f}",
+                    }).background_gradient(subset=["Course Fit (SG/round)"], cmap="RdYlGn"),
+                    use_container_width=True,
+                    height=500
+                )
+
+                # Top course fits
+                st.subheader("Best Course Fits")
+                for _, row in df.head(5).iterrows():
+                    st.success(f"**{row['Golfer']}**: +{row['Course Fit (SG/round)']:.3f} SG/round advantage")
+
+                st.subheader("Worst Course Fits")
+                for _, row in df.tail(5).iterrows():
+                    st.error(f"**{row['Golfer']}**: {row['Course Fit (SG/round)']:.3f} SG/round disadvantage")
+            else:
+                st.warning("No course fit data available.")
 
 
 def show_schedule():
@@ -437,12 +622,22 @@ def show_schedule():
         if t.is_opposite_field:
             event_type.append("OPPOSITE")
 
+        # Cut rule display
+        if not t.has_cut:
+            cut_info = "NO CUT"
+        elif t.cut_rule == CutRule.TOP_50_TIES:
+            cut_info = "Top 50+T"
+        else:
+            cut_info = "Standard"
+
         data.append({
             "Date": t.date.strftime("%b %d, %Y"),
             "Tournament": t.name,
             "Course": t.course,
             "Purse": t.purse,
             "Winner's Share": t.winner_share,
+            "Field": t.field_size,
+            "Cut": cut_info,
             "Tier": t.tier.name,
             "Type": ", ".join(event_type) if event_type else "-"
         })
@@ -459,11 +654,12 @@ def show_schedule():
 
     # Summary stats
     st.divider()
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     total_purse = sum(t.purse for t in filtered)
     majors = [t for t in filtered if t.is_major]
     tier1 = [t for t in filtered if t.tier == Tier.TIER_1]
+    no_cut = [t for t in filtered if not t.has_cut]
 
     with col1:
         st.metric("Total Events", len(filtered))
@@ -473,6 +669,8 @@ def show_schedule():
         st.metric("Majors", len(majors))
     with col4:
         st.metric("Tier 1 Events", len(tier1))
+    with col5:
+        st.metric("No-Cut Events", len(no_cut))
 
 
 def show_whatif():

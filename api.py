@@ -12,7 +12,7 @@ import requests
 
 from .config import get_config
 from .database import Database
-from .models import Golfer, GolferStats
+from .models import Golfer, GolferStats, ApproachBuckets
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +217,180 @@ class DataGolfAPI:
         )
         return data or {}
 
+    def get_approach_skill(self, tour: str = "pga") -> Dict[str, ApproachBuckets]:
+        """
+        Get approach shot skill by yardage bucket.
+        Returns strokes gained per yardage range (50-100, 100-150, 150-200, 200+).
+        """
+        data = self._request(
+            "/preds/approach-skill",
+            params={"tour": tour, "file_format": "json"},
+            cache_hours=24
+        )
+
+        if not data:
+            return {}
+
+        approach_data = {}
+        for player in data.get("players", []):
+            name = player.get("player_name", "")
+            if name:
+                approach_data[name] = ApproachBuckets(
+                    sg_50_100=player.get("sg_50_100", 0),
+                    sg_100_150=player.get("sg_100_150", 0),
+                    sg_150_200=player.get("sg_150_200", 0),
+                    sg_200_plus=player.get("sg_200_plus", 0),
+                    sg_fairway=player.get("sg_fairway", 0),
+                    sg_rough=player.get("sg_rough", 0),
+                )
+        return approach_data
+
+    def get_betting_outrights(self, tour: str = "pga", market: str = "win") -> Dict[str, Dict[str, float]]:
+        """
+        Get betting odds from multiple sportsbooks.
+        market: 'win', 'top_5', 'top_10', 'top_20', 'make_cut'
+        Returns dict of golfer_name -> {book: implied_prob, consensus: avg_prob}
+        """
+        data = self._request(
+            "/betting/outrights",
+            params={"tour": tour, "market": market, "file_format": "json"},
+            cache_hours=1
+        )
+
+        if not data:
+            return {}
+
+        odds = {}
+        for player in data.get("odds", []):
+            name = player.get("player_name", "")
+            if name:
+                books = {}
+                for book, prob in player.get("books", {}).items():
+                    books[book] = prob
+                # Calculate consensus (average of all books)
+                book_probs = list(books.values())
+                consensus = sum(book_probs) / len(book_probs) if book_probs else 0
+                books["consensus"] = consensus
+                # Data Golf model probability
+                books["datagolf_model"] = player.get("dg_prob", 0)
+                odds[name] = books
+        return odds
+
+    def get_betting_matchups(self, tour: str = "pga") -> List[Dict[str, Any]]:
+        """
+        Get head-to-head match-up and 3-ball betting odds.
+        Useful for identifying relative value.
+        """
+        data = self._request(
+            "/betting/matchups",
+            params={"tour": tour, "file_format": "json"},
+            cache_hours=1
+        )
+
+        if not data:
+            return []
+
+        matchups = []
+        for m in data.get("matchups", []):
+            matchups.append({
+                "type": m.get("type", "2ball"),  # 2ball or 3ball
+                "player1": m.get("player1_name", ""),
+                "player1_prob": m.get("player1_win_prob", 0),
+                "player2": m.get("player2_name", ""),
+                "player2_prob": m.get("player2_win_prob", 0),
+                "player3": m.get("player3_name", ""),  # For 3-ball
+                "player3_prob": m.get("player3_win_prob", 0),
+                "tie_prob": m.get("tie_prob", 0),
+            })
+        return matchups
+
+    def get_fantasy_projections(self, site: str = "draftkings") -> Dict[str, Dict[str, float]]:
+        """
+        Get fantasy golf projections for DraftKings/FanDuel.
+        site: 'draftkings' or 'fanduel'
+        """
+        data = self._request(
+            "/fantasy-projection",
+            params={"site": site, "file_format": "json"},
+            cache_hours=2
+        )
+
+        if not data:
+            return {}
+
+        projections = {}
+        for player in data.get("projections", []):
+            name = player.get("player_name", "")
+            if name:
+                projections[name] = {
+                    "salary": player.get("salary", 0),
+                    "projected_points": player.get("projected_points", 0),
+                    "ownership_pct": player.get("ownership_pct", 0),
+                    "value": player.get("value", 0),  # points per $1000
+                    "ceiling": player.get("ceiling", 0),
+                    "floor": player.get("floor", 0),
+                }
+        return projections
+
+    def get_course_fit_predictions(self, tour: str = "pga") -> Dict[str, float]:
+        """
+        Get course fit adjustments from Data Golf's baseline + course history & fit model.
+        Returns strokes gained adjustment per round based on course fit.
+        """
+        data = self._request(
+            "/preds/pre-tournament",
+            params={"tour": tour, "file_format": "json"},
+            cache_hours=1
+        )
+
+        if not data:
+            return {}
+
+        fit_adjustments = {}
+        # Compare baseline vs baseline_history_fit to get course adjustment
+        baseline = {p.get("player_name"): p for p in data.get("baseline", [])}
+        baseline_fit = {p.get("player_name"): p for p in data.get("baseline_history_fit", [])}
+
+        for name, fit_data in baseline_fit.items():
+            base_data = baseline.get(name, {})
+            # Course fit adjustment = difference in expected position
+            base_pos = base_data.get("expected_place", 50)
+            fit_pos = fit_data.get("expected_place", 50)
+            # Convert position difference to approximate SG/round
+            # Rough estimate: 1 position = 0.03 SG/round
+            fit_adjustments[name] = (base_pos - fit_pos) * 0.03
+
+        return fit_adjustments
+
+    def get_live_win_probabilities(self, tour: str = "pga") -> List[Dict[str, Any]]:
+        """
+        Get live/in-play win probabilities during tournament.
+        Returns current leaderboard with updated win probabilities.
+        """
+        data = self._request(
+            "/preds/in-play",
+            params={"tour": tour, "file_format": "json"},
+            cache_hours=0.1  # 6 minute cache for live data
+        )
+
+        if not data:
+            return []
+
+        players = []
+        for player in data.get("leaderboard", []):
+            players.append({
+                "name": player.get("player_name", ""),
+                "position": player.get("position", 0),
+                "score": player.get("total", 0),
+                "thru": player.get("thru", 0),
+                "round_score": player.get("round", 0),
+                "win_prob": player.get("win_prob", 0),
+                "top_5_prob": player.get("top_5_prob", 0),
+                "top_10_prob": player.get("top_10_prob", 0),
+                "make_cut_prob": player.get("make_cut_prob", 1.0),
+            })
+        return players
+
     def sync_golfers_to_db(self) -> int:
         """
         Sync golfer data from API to database.
@@ -231,10 +405,18 @@ class DataGolfAPI:
         # Get skill ratings
         skills = self.get_skill_ratings()
 
+        # Get approach skill data
+        approach_skills = self.get_approach_skill()
+
+        # Get course fit adjustments
+        course_fits = self.get_course_fit_predictions()
+
         count = 0
         for player in players:
             name = player["name"]
             skill_data = skills.get(name, {})
+            approach_data = approach_skills.get(name)
+            course_fit = course_fits.get(name, 0)
 
             golfer = Golfer(
                 name=name,
@@ -248,7 +430,9 @@ class DataGolfAPI:
                     sg_putting=skill_data.get("sg_putting", 0),
                     driving_distance=skill_data.get("driving_distance", 0),
                     driving_accuracy=skill_data.get("driving_accuracy", 0),
+                    approach_buckets=approach_data,
                 ),
+                course_fit_adjustment=course_fit,
             )
             self.db.save_golfer(golfer)
             count += 1
