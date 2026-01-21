@@ -27,4 +27,5 @@ pyttsx3>=2.90
 
 # Development
 pytest>=7.0.0
+pytest-mock>=3.10.0
 black>=23.0.0
