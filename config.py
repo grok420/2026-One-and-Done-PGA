@@ -65,14 +65,49 @@ class Config:
 
     def __post_init__(self):
         """Load credentials from environment."""
-        self.site_email = os.getenv("PGA_OAD_EMAIL", "gitberge@gmail.com")
-        self.site_password = os.getenv("PGA_OAD_PASSWORD", "Sixers123!")
-        self.site_username = os.getenv("PGA_OAD_USERNAME", "gitberge")
+        self.site_email = os.getenv("PGA_OAD_EMAIL", "")
+        self.site_password = os.getenv("PGA_OAD_PASSWORD", "")
+        self.site_username = os.getenv("PGA_OAD_USERNAME", "")
         self.datagolf_api_key = os.getenv("DATAGOLF_API_KEY", "")
 
-        # Ensure directories exist
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure directories exist with error handling
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError as e:
+            raise RuntimeError(
+                f"Cannot create data directory at {self.data_dir}: Permission denied. "
+                "Check directory permissions or set a different path."
+            ) from e
+        except OSError as e:
+            raise RuntimeError(
+                f"Cannot create data directory at {self.data_dir}: {e}"
+            ) from e
+
+    def validate_config(self, require_api_key: bool = True) -> List[str]:
+        """
+        Validate that required environment variables are configured.
+
+        Args:
+            require_api_key: Whether to require DATAGOLF_API_KEY
+
+        Returns:
+            List of validation error messages. Empty list means all valid.
+        """
+        errors = []
+
+        if require_api_key and not self.datagolf_api_key:
+            errors.append(
+                "DATAGOLF_API_KEY not set. "
+                "Set the DATAGOLF_API_KEY environment variable or add it to your .env file. "
+                "Get a key at https://datagolf.com/api-access"
+            )
+
+        return errors
+
+    def is_configured(self) -> bool:
+        """Check if minimum required configuration is present."""
+        return bool(self.datagolf_api_key)
 
     def save_to_env(self, env_path: Optional[Path] = None):
         """Save credentials to .env file."""

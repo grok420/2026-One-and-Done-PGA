@@ -24,6 +24,11 @@ except ImportError:
     from config import get_config
 
 
+class DatabaseError(Exception):
+    """Custom exception for database errors."""
+    pass
+
+
 class Database:
     """SQLite database manager."""
 
@@ -31,7 +36,29 @@ class Database:
         """Initialize database connection."""
         config = get_config()
         self.db_path = db_path or config.db_path
-        self._init_db()
+        try:
+            self._init_db()
+        except sqlite3.OperationalError as e:
+            error_msg = str(e).lower()
+            if "permission denied" in error_msg or "read-only" in error_msg:
+                raise DatabaseError(
+                    f"Permission denied: Cannot create or access database at {self.db_path}. "
+                    "Check file and directory permissions."
+                ) from e
+            elif "disk" in error_msg and "full" in error_msg:
+                raise DatabaseError(
+                    f"Disk full: Cannot create database at {self.db_path}. "
+                    "Free up disk space and try again."
+                ) from e
+            elif "unable to open" in error_msg:
+                raise DatabaseError(
+                    f"Cannot open database at {self.db_path}. "
+                    "Ensure the parent directory exists and is writable."
+                ) from e
+            else:
+                raise DatabaseError(f"Database initialization failed: {e}") from e
+        except Exception as e:
+            raise DatabaseError(f"Unexpected error initializing database: {e}") from e
 
     @contextmanager
     def _connection(self):
@@ -291,8 +318,18 @@ class Database:
 
     def _row_to_golfer(self, row: sqlite3.Row) -> Golfer:
         """Convert database row to Golfer object."""
-        stats_data = json.loads(row["stats_json"]) if row["stats_json"] else {}
-        course_history = json.loads(row["course_history_json"]) if row["course_history_json"] else {}
+        stats_data = {}
+        course_history = {}
+        if row["stats_json"]:
+            try:
+                stats_data = json.loads(row["stats_json"])
+            except json.JSONDecodeError:
+                pass
+        if row["course_history_json"]:
+            try:
+                course_history = json.loads(row["course_history_json"])
+            except json.JSONDecodeError:
+                pass
         return Golfer(
             name=row["name"],
             owgr=row["owgr"],
@@ -619,7 +656,12 @@ class Database:
             if row:
                 expires = datetime.fromisoformat(row["expires_at"])
                 if expires > datetime.now():
-                    return json.loads(row["value"])
+                    try:
+                        return json.loads(row["value"])
+                    except json.JSONDecodeError:
+                        # Invalid cache entry, delete it
+                        cursor.execute("DELETE FROM cache WHERE key = ?", (key,))
+                        return None
                 # Expired, delete it
                 cursor.execute("DELETE FROM cache WHERE key = ?", (key,))
         return None

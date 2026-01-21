@@ -3,7 +3,9 @@ Data Golf API client for PGA One and Done Optimizer.
 Fetches golfer predictions, odds, and statistics.
 """
 
+import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -50,8 +52,11 @@ class DataGolfAPI:
     def _request(self, endpoint: str, params: Optional[Dict] = None, cache_hours: int = 1) -> Optional[Dict]:
         """Make API request with caching."""
         if not self.api_key:
-            logger.warning("No Data Golf API key configured")
-            return None
+            raise ValueError(
+                "DATAGOLF_API_KEY not configured. "
+                "Set the DATAGOLF_API_KEY environment variable. "
+                "Get a key at https://datagolf.com/api-access"
+            )
 
         # Check cache first
         cache_key = f"datagolf:{endpoint}:{str(params)}"
@@ -60,24 +65,41 @@ class DataGolfAPI:
             logger.debug(f"Using cached data for {endpoint}")
             return cached
 
-        # Make request
+        # Make request with retry logic
         url = f"{self.BASE_URL}{endpoint}"
         params = params or {}
         params["key"] = self.api_key
 
-        try:
-            response = self._session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        max_retries = 3
+        base_delay = 1.0  # seconds
 
-            # Cache the response
-            expires = datetime.now() + timedelta(hours=cache_hours)
-            self.db.set_cache(cache_key, data, expires)
+        for attempt in range(max_retries):
+            try:
+                response = self._session.get(url, params=params, timeout=30)
+                response.raise_for_status()
 
-            return data
-        except requests.RequestException as e:
-            logger.error(f"API request failed: {e}")
-            return None
+                # Parse JSON with error handling
+                try:
+                    data = response.json()
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON response from {endpoint}: {e}")
+                    return None
+
+                # Cache the response
+                expires = datetime.now() + timedelta(hours=cache_hours)
+                self.db.set_cache(cache_key, data, expires)
+
+                return data
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"API request failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"API request failed after {max_retries} attempts: {e}")
+                    return None
+
+        return None
 
     def get_pre_tournament_predictions(self, tour: str = "pga") -> List[PredictionData]:
         """
