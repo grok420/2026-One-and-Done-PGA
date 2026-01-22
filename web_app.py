@@ -31,12 +31,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for fun styling
+# Custom CSS for styling (compatible with dark/light themes)
 st.markdown("""
 <style>
     .main-header {
         font-size: 2.5rem;
-        color: #1E88E5;
         text-align: center;
         padding: 1rem;
         background: linear-gradient(90deg, #1a472a 0%, #2d5a3d 100%);
@@ -50,17 +49,6 @@ st.markdown("""
         border-radius: 15px;
         color: white;
         margin: 0.5rem 0;
-    }
-    .metric-card {
-        background: #f0f2f6;
-        padding: 1rem;
-        border-radius: 10px;
-        text-align: center;
-    }
-    .stMetric {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 10px;
     }
     .recommendation-1 { border-left: 5px solid #FFD700; }
     .recommendation-2 { border-left: 5px solid #C0C0C0; }
@@ -80,6 +68,16 @@ def init_session_state():
     if 'api' not in st.session_state:
         st.session_state.api = DataGolfAPI()
 
+    # Check if data sync is needed (only on initial load)
+    if 'data_sync_checked' not in st.session_state:
+        st.session_state.data_sync_checked = True
+        db = st.session_state.db
+        golfer_count = db.get_golfer_count()
+        valid_owgr_count = db.get_valid_owgr_count()
+
+        # Data sync is needed if no golfers or all have default OWGR 999
+        st.session_state.data_sync_needed = (golfer_count == 0 or valid_owgr_count == 0)
+
 
 def main():
     """Main application."""
@@ -87,6 +85,26 @@ def main():
 
     # Header
     st.markdown('<div class="main-header">PGA One and Done Optimizer</div>', unsafe_allow_html=True)
+
+    # Data sync warning banner
+    if st.session_state.get('data_sync_needed', False):
+        st.warning("**No golfer data found.** Your database appears to be empty or missing valid data.")
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("Sync Data Now", type="primary"):
+                with st.spinner("Syncing golfer data from Data Golf API..."):
+                    try:
+                        api = st.session_state.api
+                        count = api.sync_golfers_to_db()
+                        preds = api.get_pre_tournament_predictions()
+                        st.session_state.data_sync_needed = False
+                        st.success(f"Synced {count} golfers and {len(preds)} predictions!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Sync failed: {e}")
+        with col2:
+            st.caption("This will fetch golfer data, rankings, and predictions from the Data Golf API.")
+        st.divider()
 
     # Sidebar navigation
     st.sidebar.image("https://www.pgatour.com/content/dam/pgatour/logos/pga-tour-logo.svg", width=150)
@@ -149,8 +167,12 @@ def show_dashboard():
     if next_t:
         strategy = st.session_state.strategy
 
-        with st.spinner("Running simulations..."):
-            recs = strategy.get_recommendations(next_t, top_n=5)
+        try:
+            with st.spinner("Running simulations..."):
+                recs = strategy.get_recommendations(next_t, top_n=5)
+        except Exception as e:
+            st.error(f"Failed to generate recommendations: {e}")
+            recs = []
 
         if recs:
             # Top pick highlight
@@ -180,6 +202,8 @@ def show_dashboard():
             )
 
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No recommendations available yet. Click 'Sync Data Now' above or go to Settings to update data.")
 
     # Season progress
     st.subheader("Season Progress")
@@ -240,6 +264,24 @@ def show_recommendations():
 
         if not recs:
             st.error("No recommendations available. Please update data first.")
+
+            # Troubleshooting expander
+            with st.expander("Troubleshooting Info"):
+                db = st.session_state.db
+                api = st.session_state.api
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Golfers in DB", db.get_golfer_count())
+                with col2:
+                    st.metric("Valid OWGR Count", db.get_valid_owgr_count())
+                with col3:
+                    st.metric("Golfers Used", len(db.get_used_golfers()))
+
+                if api.last_error:
+                    st.error(f"Last API Error: {api.last_error}")
+
+                st.info("Try: Go to Settings → Click 'Update from API' or 'Clear All Cache' first.")
             return
 
         st.success(f"Generated {len(recs)} recommendations!")
@@ -261,6 +303,14 @@ def show_recommendations():
             for i, rec in enumerate(recs, 1):
                 sim = db.get_simulation(rec.golfer.name, tournament.name)
 
+                # Calculate probabilities for display
+                if sim:
+                    win_pct = sim.win_rate * 100
+                    top10_pct = sim.top_10_rate * 100
+                else:
+                    win_pct = rec.golfer.win_probability * 100 if rec.golfer.win_probability else 0
+                    top10_pct = rec.golfer.top_10_probability * 100 if rec.golfer.top_10_probability else 0
+
                 # Medal colors for top 3
                 if i == 1:
                     medal = ""
@@ -277,10 +327,23 @@ def show_recommendations():
 
                 # Show OWGR warning in the expander title if applicable
                 owgr_flag = " OWGR RISK" if rec.owgr_warning else ""
-                with st.expander(f"{medal} **{rec.golfer.name}** - EV: ${rec.expected_value:,.0f}{owgr_flag}", expanded=(i <= 3)):
+                with st.expander(f"{medal} **{rec.golfer.name}** | Win: {win_pct:.1f}% | EV: ${rec.expected_value:,.0f}{owgr_flag}", expanded=(i <= 3)):
                     # OWGR Warning banner
                     if rec.owgr_warning:
                         st.error(f"OWGR Warning: Rank {rec.golfer.owgr} is outside top 65. Historical winners avoid these picks.")
+
+                    # Opportunity cost warning for elite picks at non-major events
+                    is_elite = rec.golfer.owgr <= 20
+                    if is_elite and not tournament.is_major and not tournament.is_signature:
+                        # Estimate opportunity cost - elite picks are worth more at majors
+                        majors = get_majors()
+                        remaining_majors = [m for m in majors if m.date >= date.today()]
+                        if remaining_majors:
+                            avg_major_purse = sum(m.winner_share for m in remaining_majors) / len(remaining_majors)
+                            # Estimate major EV based on win probability
+                            major_ev = win_pct / 100 * avg_major_purse * 0.5  # Rough estimate
+                            if major_ev > rec.expected_value * 1.5:
+                                st.warning(f"Opportunity Cost: Elite pick (OWGR #{rec.golfer.owgr}) could be worth ${major_ev:,.0f} at a major")
 
                     col1, col2, col3, col4 = st.columns(4)
 
@@ -290,13 +353,14 @@ def show_recommendations():
                         st.metric("OWGR", rec.golfer.owgr)
 
                     with col2:
-                        win_pct = sim.win_rate * 100 if sim else 0
-                        top10_pct = sim.top_10_rate * 100 if sim else 0
                         st.metric("Win %", f"{win_pct:.2f}%")
                         st.metric("Top-10 %", f"{top10_pct:.1f}%")
 
                     with col3:
-                        cut_pct = sim.cut_rate * 100 if sim else 0
+                        if sim:
+                            cut_pct = sim.cut_rate * 100
+                        else:
+                            cut_pct = rec.golfer.make_cut_probability * 100 if rec.golfer.make_cut_probability else 85
                         if tournament.has_cut:
                             st.metric("Cut %", f"{cut_pct:.0f}%")
                         else:
@@ -307,6 +371,9 @@ def show_recommendations():
                         if sim:
                             st.metric("Upside (90th)", f"${sim.percentile_90:,.0f}")
                             st.metric("Downside (10th)", f"${sim.percentile_10 if tournament.has_cut else tournament.min_payout:,.0f}")
+                        else:
+                            st.metric("Upside (90th)", "N/A")
+                            st.metric("Downside (10th)", "N/A")
 
                     # Course Fit indicator
                     if rec.course_fit_sg != 0:
@@ -324,7 +391,9 @@ def show_recommendations():
                     elif rec.regret_risk < 0.1:
                         st.success("Low regret risk - solid choice!")
 
-                    st.caption(f"Analysis: {rec.reasoning}")
+                    # Expandable reasoning section
+                    with st.expander("Why this pick?"):
+                        st.write(rec.reasoning)
 
         with tab2:
             st.subheader("Visual Comparison")
@@ -464,25 +533,30 @@ def show_betting_odds():
                         })
 
                 df = pd.DataFrame(data)
-                df = df.sort_values("Value", ascending=False)
+                if not df.empty:
+                    df = df.sort_values("Value", ascending=False)
 
-                # Highlight value picks
-                st.dataframe(
-                    df.style.format({
-                        "DG Model %": "{:.2f}%",
-                        "Market %": "{:.2f}%",
-                        "Value": "{:+.2f}%"
-                    }).background_gradient(subset=["Value"], cmap="RdYlGn"),
-                    use_container_width=True,
-                    height=500
-                )
+                    # Display without background_gradient for compatibility
+                    st.dataframe(
+                        df.style.format({
+                            "DG Model %": "{:.2f}%",
+                            "Market %": "{:.2f}%",
+                            "Value": "{:+.2f}%"
+                        }),
+                        use_container_width=True,
+                        height=500
+                    )
 
-                # Top value picks
-                st.subheader("Top Value Picks (Model > Market)")
-                top_value = df[df["Value"] > 0].head(10)
-                if not top_value.empty:
-                    for _, row in top_value.iterrows():
-                        st.success(f"**{row['Golfer']}**: DG Model {row['DG Model %']:.2f}% vs Market {row['Market %']:.2f}% (+{row['Value']:.2f}% edge)")
+                    # Top value picks
+                    st.subheader("Top Value Picks (Model > Market)")
+                    top_value = df[df["Value"] > 0].head(10)
+                    if not top_value.empty:
+                        for _, row in top_value.iterrows():
+                            st.success(f"**{row['Golfer']}**: DG Model {row['DG Model %']:.2f}% vs Market {row['Market %']:.2f}% (+{row['Value']:.2f}% edge)")
+                    else:
+                        st.info("No undervalued picks found in this market.")
+                else:
+                    st.warning("No odds data to display.")
             else:
                 st.warning("No betting odds available. Ensure API key is configured.")
 
@@ -503,40 +577,44 @@ def show_betting_odds():
                         "100-150 yds": buckets.sg_100_150,
                         "150-200 yds": buckets.sg_150_200,
                         "200+ yds": buckets.sg_200_plus,
-                        "Fairway": buckets.sg_fairway,
-                        "Rough": buckets.sg_rough,
+                        "Rough >150": buckets.sg_fairway,
+                        "Rough <150": buckets.sg_rough,
                     })
 
                 df = pd.DataFrame(data)
 
-                # Filter options
-                sort_by = st.selectbox("Sort by", ["50-100 yds", "100-150 yds", "150-200 yds", "200+ yds", "Fairway", "Rough"])
-                df = df.sort_values(sort_by, ascending=False)
+                if not df.empty:
+                    # Filter options
+                    sort_by = st.selectbox("Sort by", ["50-100 yds", "100-150 yds", "150-200 yds", "200+ yds", "Rough >150", "Rough <150"])
+                    df = df.sort_values(sort_by, ascending=False)
 
-                st.dataframe(
-                    df.style.format({
-                        "50-100 yds": "{:.3f}",
-                        "100-150 yds": "{:.3f}",
-                        "150-200 yds": "{:.3f}",
-                        "200+ yds": "{:.3f}",
-                        "Fairway": "{:.3f}",
-                        "Rough": "{:.3f}",
-                    }).background_gradient(cmap="RdYlGn"),
-                    use_container_width=True,
-                    height=500
-                )
+                    # Display without background_gradient to avoid matplotlib dependency issues
+                    st.dataframe(
+                        df.style.format({
+                            "50-100 yds": "{:.3f}",
+                            "100-150 yds": "{:.3f}",
+                            "150-200 yds": "{:.3f}",
+                            "200+ yds": "{:.3f}",
+                            "Rough >150": "{:.3f}",
+                            "Rough <150": "{:.3f}",
+                        }),
+                        use_container_width=True,
+                        height=500
+                    )
 
-                # Chart for top players
-                top_10 = df.head(10)
-                fig = go.Figure()
-                for col in ["50-100 yds", "100-150 yds", "150-200 yds", "200+ yds"]:
-                    fig.add_trace(go.Bar(name=col, x=top_10["Golfer"], y=top_10[col]))
-                fig.update_layout(
-                    title=f"Top 10 Players by {sort_by} - Approach Breakdown",
-                    barmode='group',
-                    height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    # Chart for top players
+                    top_10 = df.head(10)
+                    fig = go.Figure()
+                    for col in ["50-100 yds", "100-150 yds", "150-200 yds", "200+ yds"]:
+                        fig.add_trace(go.Bar(name=col, x=top_10["Golfer"], y=top_10[col]))
+                    fig.update_layout(
+                        title=f"Top 10 Players by {sort_by} - Approach Breakdown",
+                        barmode='group',
+                        height=400
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No approach skill data found.")
             else:
                 st.warning("No approach skill data available.")
 
@@ -554,29 +632,36 @@ def show_betting_odds():
                     if adjustment != 0:
                         data.append({
                             "Golfer": golfer,
-                            "Course Fit (SG/round)": adjustment,
+                            "Course Fit": adjustment,
                             "Impact": "Strong Positive" if adjustment > 0.3 else ("Positive" if adjustment > 0 else ("Negative" if adjustment > -0.3 else "Strong Negative"))
                         })
 
-                df = pd.DataFrame(data)
-                df = df.sort_values("Course Fit (SG/round)", ascending=False)
+                if data:
+                    df = pd.DataFrame(data)
+                    df = df.sort_values("Course Fit", ascending=False)
 
-                st.dataframe(
-                    df.style.format({
-                        "Course Fit (SG/round)": "{:+.3f}",
-                    }).background_gradient(subset=["Course Fit (SG/round)"], cmap="RdYlGn"),
-                    use_container_width=True,
-                    height=500
-                )
+                    # Display without background_gradient for compatibility
+                    st.dataframe(
+                        df.style.format({
+                            "Course Fit": "{:+.3f}",
+                        }),
+                        use_container_width=True,
+                        height=500
+                    )
 
-                # Top course fits
-                st.subheader("Best Course Fits")
-                for _, row in df.head(5).iterrows():
-                    st.success(f"**{row['Golfer']}**: +{row['Course Fit (SG/round)']:.3f} SG/round advantage")
+                    # Top course fits
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.subheader("Best Course Fits")
+                        for _, row in df.head(5).iterrows():
+                            st.success(f"**{row['Golfer']}**: +{row['Course Fit']:.3f} SG/round")
 
-                st.subheader("Worst Course Fits")
-                for _, row in df.tail(5).iterrows():
-                    st.error(f"**{row['Golfer']}**: {row['Course Fit (SG/round)']:.3f} SG/round disadvantage")
+                    with col2:
+                        st.subheader("Worst Course Fits")
+                        for _, row in df.tail(5).iterrows():
+                            st.error(f"**{row['Golfer']}**: {row['Course Fit']:.3f} SG/round")
+                else:
+                    st.warning("No course fit adjustments found (all players have neutral fit).")
             else:
                 st.warning("No course fit data available.")
 
@@ -711,9 +796,25 @@ def show_whatif():
         g1 = db.get_golfer(golfer1)
         g2 = db.get_golfer(golfer2)
 
-        with st.spinner("Running simulations..."):
-            sim1 = simulator.simulate_tournament(g1, tournament)
-            sim2 = simulator.simulate_tournament(g2, tournament)
+        if not g1 or not g2:
+            st.error("Could not find golfer data. Please sync data first in Settings.")
+            return
+
+        if not tournament:
+            st.error("Could not find tournament data.")
+            return
+
+        try:
+            with st.spinner("Running simulations..."):
+                sim1 = simulator.simulate_tournament(g1, tournament)
+                sim2 = simulator.simulate_tournament(g2, tournament)
+        except Exception as e:
+            st.error(f"Simulation failed: {e}")
+            return
+
+        if not sim1 or not sim2:
+            st.error("Simulation returned no results. Check golfer data and try again.")
+            return
 
         # Results
         st.subheader("Comparison Results")
@@ -778,25 +879,29 @@ def show_planner():
 
         # Elite reservations
         st.subheader("Elite Reservations (Majors)")
-        if plan['elite_reservation']:
+        if plan.get('elite_reservation'):
             for r in plan['elite_reservation']:
                 st.info(f"**{r['tournament']}**: {r['golfer']}")
         else:
-            st.caption("No elite reservations")
+            st.caption("No elite reservations - sync data to see recommendations")
 
         # Signature picks
         st.subheader("Signature Event Picks")
-        if plan['recommendations']['signatures']:
+        if plan.get('recommendations', {}).get('signatures'):
             data = plan['recommendations']['signatures']
             df = pd.DataFrame(data)
             st.dataframe(df, use_container_width=True)
+        else:
+            st.caption("No signature event picks available - sync data to see recommendations")
 
         # Regular picks
         st.subheader("Regular Event Picks")
-        if plan['recommendations']['regular']:
+        if plan.get('recommendations', {}).get('regular'):
             data = plan['recommendations']['regular'][:15]  # Show first 15
             df = pd.DataFrame(data)
             st.dataframe(df, use_container_width=True)
+        else:
+            st.caption("No regular event picks available - sync data to see recommendations")
 
 
 def show_standings():
@@ -876,21 +981,63 @@ def show_settings():
 
     st.subheader("Data Management")
 
-    col1, col2 = st.columns(2)
+    # Data status metrics
+    db = st.session_state.db
+    api = st.session_state.api
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Golfers in DB", db.get_golfer_count())
+    with col2:
+        st.metric("Valid OWGR", db.get_valid_owgr_count())
+    with col3:
+        st.metric("Picks Made", db.get_picks_count())
+    with col4:
+        st.metric("Total Earnings", f"${db.get_total_earnings():,}")
+
+    st.divider()
+
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        if st.button("Update from API"):
-            with st.spinner("Fetching data..."):
-                api = st.session_state.api
-                api.sync_golfers_to_db()
-                preds = api.get_pre_tournament_predictions()
-            st.success(f"Synced {len(preds)} predictions!")
+        if st.button("Update from API", type="primary"):
+            with st.spinner("Fetching data from Data Golf API..."):
+                try:
+                    count = api.sync_golfers_to_db()
+                    preds = api.get_pre_tournament_predictions()
+                    st.session_state.data_sync_needed = False
+                    st.success(f"Synced {count} golfers and {len(preds)} predictions!")
+                except Exception as e:
+                    st.error(f"Sync failed: {e}")
+                    if api.last_error:
+                        st.caption(f"Details: {api.last_error}")
 
     with col2:
-        if st.button("Clear Cache"):
-            db = st.session_state.db
+        if st.button("Clear All Cache"):
+            cleared = db.clear_all_api_cache()
             db.clear_expired_cache()
-            st.success("Cache cleared!")
+            st.success(f"Cleared {cleared} cached API responses!")
+
+    with col3:
+        if st.button("Clear Simulation Cache"):
+            cleared = db.clear_simulation_cache()
+            st.success(f"Cleared {cleared} cached simulations. Recommendations will recalculate.")
+
+    with col4:
+        if st.button("Check API Health"):
+            with st.spinner("Checking API..."):
+                try:
+                    healthy = api.health_check()
+                    if healthy:
+                        st.success("API connection healthy!")
+                    else:
+                        st.error("API check failed. Verify your API key.")
+                except Exception as e:
+                    st.error(f"API check failed: {e}")
+
+    # Show last error if any
+    if api.last_error:
+        st.warning(f"Last API Error: {api.last_error}")
 
 
 if __name__ == "__main__":
