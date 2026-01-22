@@ -613,3 +613,540 @@ PAYOUT_DISTRIBUTION: Dict[int, float] = {
     56: 0.0053, 57: 0.00525, 58: 0.0052, 59: 0.00515, 60: 0.0051,
     61: 0.00505, 62: 0.005, 63: 0.00495, 64: 0.0049, 65: 0.00485,
 }
+
+
+# ============================================================================
+# COURSE FIT PROFILES
+# Based on historical analysis from Data Golf and PGA Tour statistics
+# Values represent relative importance weights (-1 to +1 scale):
+#   Positive = skill is advantageous at this course
+#   Negative = skill is less important or disadvantageous
+#   0 = neutral
+# ============================================================================
+
+@dataclass
+class CourseProfile:
+    """Course characteristics that affect player fit."""
+    # Driving factors
+    driving_distance: float = 0.0    # Longer courses favor bombers
+    driving_accuracy: float = 0.0    # Narrow courses favor accuracy
+    # Approach factors (by yardage)
+    approach_long: float = 0.0       # 200+ yard approaches
+    approach_mid: float = 0.0        # 150-200 yard approaches
+    approach_short: float = 0.0      # 100-150 yard approaches
+    # Short game factors
+    around_green: float = 0.0        # Chipping/pitching importance
+    putting: float = 0.0             # Putting surface difficulty
+    # Course conditions
+    rough_penalty: float = 0.0       # How penal is the rough
+    wind_factor: float = 0.0         # Exposed to wind (links-style)
+
+
+# Course profiles for 2026 PGA Tour venues
+# Research sources: Data Golf course fit tool, PGA Tour historical stats
+COURSE_PROFILES: Dict[str, CourseProfile] = {
+    # === MAJORS ===
+    "Augusta National": CourseProfile(
+        driving_distance=0.7,     # Length matters, bombers thrive
+        driving_accuracy=-0.2,    # Wide fairways
+        approach_long=0.6,        # Many long approaches
+        approach_mid=0.4,
+        approach_short=0.3,
+        around_green=0.8,         # Severely contoured greens
+        putting=0.9,              # Most demanding greens on tour
+        rough_penalty=0.3,        # Light rough but position matters
+        wind_factor=0.2,
+    ),
+    "Aronimink Golf Club": CourseProfile(  # PGA Championship 2026
+        driving_distance=0.5,
+        driving_accuracy=0.6,     # Tree-lined, tight
+        approach_long=0.5,
+        approach_mid=0.6,
+        approach_short=0.4,
+        around_green=0.5,
+        putting=0.6,
+        rough_penalty=0.7,        # US PGA setup = thick rough
+        wind_factor=0.1,
+    ),
+    "Shinnecock Hills": CourseProfile(  # US Open 2026
+        driving_distance=0.3,
+        driving_accuracy=0.8,     # Narrow, demanding
+        approach_long=0.4,
+        approach_mid=0.7,
+        approach_short=0.5,
+        around_green=0.7,
+        putting=0.8,              # Fast, undulating
+        rough_penalty=0.9,        # USGA setup = brutal rough
+        wind_factor=0.8,          # Exposed links-style
+    ),
+    "Royal Birkdale": CourseProfile(  # The Open 2026
+        driving_distance=0.2,
+        driving_accuracy=0.7,
+        approach_long=0.3,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.8,         # Links bump-and-run
+        putting=0.6,
+        rough_penalty=0.7,
+        wind_factor=0.9,          # Links = wind is major factor
+    ),
+
+    # === SIGNATURE EVENTS ===
+    "Pebble Beach Golf Links": CourseProfile(
+        driving_distance=0.1,     # Short course
+        driving_accuracy=0.7,     # Tight, coastal
+        approach_long=0.2,
+        approach_mid=0.5,
+        approach_short=0.7,       # Many short approaches
+        around_green=0.6,
+        putting=0.7,              # Poa annua greens
+        rough_penalty=0.5,
+        wind_factor=0.7,          # Ocean wind
+    ),
+    "Riviera Country Club": CourseProfile(  # Genesis Invitational
+        driving_distance=0.4,
+        driving_accuracy=0.6,
+        approach_long=0.5,
+        approach_mid=0.7,         # Classic approach course
+        approach_short=0.5,
+        around_green=0.6,
+        putting=0.7,              # Kikuyu surrounds tricky
+        rough_penalty=0.6,
+        wind_factor=0.3,
+    ),
+    "Bay Hill Club": CourseProfile(  # Arnold Palmer Invitational
+        driving_distance=0.6,
+        driving_accuracy=0.5,
+        approach_long=0.6,
+        approach_mid=0.5,
+        approach_short=0.4,
+        around_green=0.5,
+        putting=0.6,
+        rough_penalty=0.5,
+        wind_factor=0.4,
+    ),
+    "TPC Sawgrass": CourseProfile(  # The Players
+        driving_distance=0.3,
+        driving_accuracy=0.8,     # Water everywhere
+        approach_long=0.4,
+        approach_mid=0.7,
+        approach_short=0.6,
+        around_green=0.5,
+        putting=0.7,
+        rough_penalty=0.4,
+        wind_factor=0.5,
+    ),
+    "Harbour Town Golf Links": CourseProfile(  # RBC Heritage
+        driving_distance=-0.3,    # Short course, bombers disadvantaged
+        driving_accuracy=0.9,     # Very tight, tree-lined
+        approach_long=0.1,
+        approach_mid=0.4,
+        approach_short=0.8,       # Precision course
+        around_green=0.6,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.6,
+    ),
+    "Trump National Doral": CourseProfile(  # Miami Championship
+        driving_distance=0.7,     # Blue Monster is long
+        driving_accuracy=0.4,
+        approach_long=0.7,
+        approach_mid=0.5,
+        approach_short=0.3,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.6,          # Florida wind
+    ),
+    "Quail Hollow Club": CourseProfile(  # Truist Championship
+        driving_distance=0.8,     # One of longest on tour
+        driving_accuracy=0.5,
+        approach_long=0.8,        # Many 200+ approaches
+        approach_mid=0.5,
+        approach_short=0.3,
+        around_green=0.5,
+        putting=0.6,
+        rough_penalty=0.6,
+        wind_factor=0.2,
+    ),
+    "Muirfield Village": CourseProfile(  # Memorial
+        driving_distance=0.5,
+        driving_accuracy=0.7,
+        approach_long=0.5,
+        approach_mid=0.7,
+        approach_short=0.5,
+        around_green=0.6,
+        putting=0.7,              # Jack's greens are demanding
+        rough_penalty=0.6,
+        wind_factor=0.3,
+    ),
+    "TPC River Highlands": CourseProfile(  # Travelers
+        driving_distance=0.2,     # Shorter course
+        driving_accuracy=0.6,
+        approach_long=0.2,
+        approach_mid=0.5,
+        approach_short=0.7,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.3,
+    ),
+
+    # === TIER 2 EVENTS ===
+    "Waialae Country Club": CourseProfile(  # Sony Open
+        driving_distance=0.0,     # Short, accuracy matters
+        driving_accuracy=0.7,
+        approach_long=0.1,
+        approach_mid=0.4,
+        approach_short=0.7,
+        around_green=0.5,
+        putting=0.6,
+        rough_penalty=0.3,
+        wind_factor=0.7,          # Trade winds
+    ),
+    "PGA West": CourseProfile(  # American Express
+        driving_distance=0.5,
+        driving_accuracy=0.4,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.4,
+    ),
+    "Torrey Pines": CourseProfile(  # Farmers Insurance Open
+        driving_distance=0.8,     # South course is very long
+        driving_accuracy=0.6,
+        approach_long=0.8,
+        approach_mid=0.5,
+        approach_short=0.3,
+        around_green=0.5,
+        putting=0.6,              # Poa annua
+        rough_penalty=0.7,
+        wind_factor=0.5,
+    ),
+    "TPC Scottsdale": CourseProfile(  # WM Phoenix Open
+        driving_distance=0.5,
+        driving_accuracy=0.5,
+        approach_long=0.5,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.3,
+    ),
+    "PGA National": CourseProfile(  # Cognizant Classic
+        driving_distance=0.4,
+        driving_accuracy=0.6,
+        approach_long=0.4,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.5,
+        wind_factor=0.6,
+    ),
+    "Innisbrook Resort": CourseProfile(  # Valspar
+        driving_distance=0.3,
+        driving_accuracy=0.7,     # Copperhead is tight
+        approach_long=0.3,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.6,
+        putting=0.6,
+        rough_penalty=0.5,
+        wind_factor=0.4,
+    ),
+    "Memorial Park Golf Course": CourseProfile(  # Houston Open
+        driving_distance=0.6,
+        driving_accuracy=0.5,
+        approach_long=0.6,
+        approach_mid=0.5,
+        approach_short=0.4,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.5,
+        wind_factor=0.5,
+    ),
+    "TPC San Antonio": CourseProfile(  # Valero Texas Open
+        driving_distance=0.6,
+        driving_accuracy=0.5,
+        approach_long=0.6,
+        approach_mid=0.5,
+        approach_short=0.4,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.6,
+    ),
+    "TPC Louisiana": CourseProfile(  # Zurich Classic
+        driving_distance=0.5,
+        driving_accuracy=0.4,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.4,
+    ),
+    "TPC Craig Ranch": CourseProfile(  # Byron Nelson
+        driving_distance=0.6,
+        driving_accuracy=0.4,
+        approach_long=0.6,
+        approach_mid=0.5,
+        approach_short=0.4,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.5,
+    ),
+    "Colonial Country Club": CourseProfile(  # Charles Schwab
+        driving_distance=-0.2,    # "Hogan's Alley" - precision course
+        driving_accuracy=0.9,     # Tight fairways
+        approach_long=0.2,
+        approach_mid=0.6,
+        approach_short=0.7,
+        around_green=0.6,
+        putting=0.6,
+        rough_penalty=0.5,
+        wind_factor=0.4,
+    ),
+    "TPC Toronto": CourseProfile(  # RBC Canadian Open
+        driving_distance=0.5,
+        driving_accuracy=0.5,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.5,
+        wind_factor=0.4,
+    ),
+    "Renaissance Club": CourseProfile(  # Scottish Open
+        driving_distance=0.4,
+        driving_accuracy=0.6,
+        approach_long=0.4,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.7,
+        putting=0.5,
+        rough_penalty=0.6,
+        wind_factor=0.8,          # Links-style
+    ),
+    "Detroit Golf Club": CourseProfile(  # Rocket Mortgage
+        driving_distance=0.4,
+        driving_accuracy=0.5,
+        approach_long=0.4,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.3,
+    ),
+
+    # === TIER 3 / FALL EVENTS ===
+    "Grand Reserve Golf Club": CourseProfile(  # Puerto Rico Open
+        driving_distance=0.5,
+        driving_accuracy=0.4,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.6,
+    ),
+    "Dunes Golf and Beach Club": CourseProfile(  # Myrtle Beach
+        driving_distance=0.4,
+        driving_accuracy=0.5,
+        approach_long=0.4,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.5,
+    ),
+    "TPC Deere Run": CourseProfile(  # John Deere Classic
+        driving_distance=0.3,
+        driving_accuracy=0.5,
+        approach_long=0.3,
+        approach_mid=0.5,
+        approach_short=0.6,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.3,
+    ),
+    "TPC Twin Cities": CourseProfile(  # 3M Open
+        driving_distance=0.5,
+        driving_accuracy=0.5,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.3,
+    ),
+    "Sedgefield Country Club": CourseProfile(  # Wyndham
+        driving_distance=0.1,
+        driving_accuracy=0.7,
+        approach_long=0.2,
+        approach_mid=0.5,
+        approach_short=0.6,
+        around_green=0.6,
+        putting=0.6,
+        rough_penalty=0.4,
+        wind_factor=0.2,
+    ),
+
+    # === PLAYOFF EVENTS ===
+    "TPC Southwind": CourseProfile(  # FedEx St. Jude
+        driving_distance=0.4,
+        driving_accuracy=0.7,
+        approach_long=0.4,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.6,
+        rough_penalty=0.6,
+        wind_factor=0.3,
+    ),
+    "Bellerive Country Club": CourseProfile(  # BMW Championship
+        driving_distance=0.6,
+        driving_accuracy=0.5,
+        approach_long=0.6,
+        approach_mid=0.5,
+        approach_short=0.4,
+        around_green=0.5,
+        putting=0.6,
+        rough_penalty=0.5,
+        wind_factor=0.3,
+    ),
+    "East Lake Golf Club": CourseProfile(  # Tour Championship
+        driving_distance=0.5,
+        driving_accuracy=0.6,
+        approach_long=0.5,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.6,
+        putting=0.7,
+        rough_penalty=0.5,
+        wind_factor=0.2,
+    ),
+
+    # === ADDITIONAL FALL EVENTS ===
+    "Silverado Resort": CourseProfile(  # Procore
+        driving_distance=0.3,
+        driving_accuracy=0.5,
+        approach_long=0.3,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.4,
+    ),
+    "Country Club of Jackson": CourseProfile(  # Sanderson Farms
+        driving_distance=0.5,
+        driving_accuracy=0.5,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.3,
+    ),
+    "TPC Summerlin": CourseProfile(  # Shriners
+        driving_distance=0.4,
+        driving_accuracy=0.4,
+        approach_long=0.4,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.2,
+        wind_factor=0.4,
+    ),
+    "Accordia Golf Narashino": CourseProfile(  # ZOZO
+        driving_distance=0.3,
+        driving_accuracy=0.6,
+        approach_long=0.3,
+        approach_mid=0.6,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.5,
+        wind_factor=0.3,
+    ),
+    "El Cardonal at Diamante": CourseProfile(  # WWT Championship
+        driving_distance=0.5,
+        driving_accuracy=0.4,
+        approach_long=0.5,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.6,
+    ),
+    "Port Royal Golf Course": CourseProfile(  # Bermuda
+        driving_distance=0.2,
+        driving_accuracy=0.6,
+        approach_long=0.2,
+        approach_mid=0.5,
+        approach_short=0.6,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.8,          # Ocean wind
+    ),
+    "Sea Island Golf Club": CourseProfile(  # RSM Classic
+        driving_distance=0.3,
+        driving_accuracy=0.6,
+        approach_long=0.3,
+        approach_mid=0.5,
+        approach_short=0.6,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.6,
+    ),
+    "Hurstbourne Country Club": CourseProfile(  # ISCO
+        driving_distance=0.4,
+        driving_accuracy=0.5,
+        approach_long=0.4,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.5,
+        putting=0.5,
+        rough_penalty=0.4,
+        wind_factor=0.3,
+    ),
+    "Puntacana Resort": CourseProfile(  # Corales
+        driving_distance=0.4,
+        driving_accuracy=0.5,
+        approach_long=0.4,
+        approach_mid=0.5,
+        approach_short=0.5,
+        around_green=0.4,
+        putting=0.5,
+        rough_penalty=0.3,
+        wind_factor=0.7,
+    ),
+}
+
+
+def get_course_profile(course_name: str) -> Optional[CourseProfile]:
+    """Get course profile by name (case-insensitive partial match)."""
+    name_lower = course_name.lower()
+    for course, profile in COURSE_PROFILES.items():
+        if name_lower in course.lower() or course.lower() in name_lower:
+            return profile
+    return None

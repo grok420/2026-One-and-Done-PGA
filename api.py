@@ -48,10 +48,12 @@ class DataGolfAPI:
         self.api_key = api_key or config.datagolf_api_key
         self.db = Database()
         self._session = requests.Session()
+        self.last_error: str = ""  # Track last error for UI display
 
     def _request(self, endpoint: str, params: Optional[Dict] = None, cache_hours: int = 1) -> Optional[Dict]:
         """Make API request with caching."""
         if not self.api_key:
+            self.last_error = "DATAGOLF_API_KEY not configured"
             raise ValueError(
                 "DATAGOLF_API_KEY not configured. "
                 "Set the DATAGOLF_API_KEY environment variable. "
@@ -82,15 +84,22 @@ class DataGolfAPI:
                 try:
                     data = response.json()
                 except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON response from {endpoint}: {e}")
+                    self.last_error = f"Failed to parse JSON from {endpoint}: {e}"
+                    logger.error(self.last_error)
                     return None
 
-                # Cache the response
-                expires = datetime.now() + timedelta(hours=cache_hours)
-                self.db.set_cache(cache_key, data, expires)
+                # Only cache non-empty responses
+                if data and (isinstance(data, dict) and len(data) > 0 or isinstance(data, list) and len(data) > 0):
+                    expires = datetime.now() + timedelta(hours=cache_hours)
+                    self.db.set_cache(cache_key, data, expires)
+                    self.last_error = ""  # Clear error on success
+                else:
+                    self.last_error = f"Empty response from {endpoint}"
+                    logger.warning(self.last_error)
 
                 return data
             except requests.RequestException as e:
+                self.last_error = f"API request failed: {e}"
                 if attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)  # Exponential backoff
                     logger.warning(f"API request failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
@@ -116,17 +125,19 @@ class DataGolfAPI:
             return []
 
         predictions = []
-        baseline_preds = data.get("baseline_history_fit", [])
+        # Try both keys - API may return either
+        baseline_preds = data.get("baseline_history_fit") or data.get("baseline", [])
 
         for player in baseline_preds:
+            # API uses 'win', 'top_5', etc. (without _prob suffix)
             pred = PredictionData(
                 golfer_name=player.get("player_name", ""),
                 datagolf_id=str(player.get("dg_id", "")),
-                win_prob=player.get("win_prob", 0),
-                top_5_prob=player.get("top_5_prob", 0),
-                top_10_prob=player.get("top_10_prob", 0),
-                top_20_prob=player.get("top_20_prob", 0),
-                make_cut_prob=player.get("make_cut_prob", 0),
+                win_prob=player.get("win_prob") or player.get("win", 0),
+                top_5_prob=player.get("top_5_prob") or player.get("top_5", 0),
+                top_10_prob=player.get("top_10_prob") or player.get("top_10", 0),
+                top_20_prob=player.get("top_20_prob") or player.get("top_20", 0),
+                make_cut_prob=player.get("make_cut_prob") or player.get("make_cut", 0),
                 expected_position=player.get("expected_place", 50),
             )
             predictions.append(pred)
@@ -195,6 +206,33 @@ class DataGolfAPI:
             })
         return players
 
+    def get_dg_rankings(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get Data Golf rankings with proper OWGR data.
+        Returns top 500 players with skill estimates and OWGR rank.
+        """
+        data = self._request(
+            "/preds/get-dg-rankings",
+            params={"file_format": "json"},
+            cache_hours=12
+        )
+
+        if not data:
+            return {}
+
+        rankings = {}
+        rankings_list = data.get("rankings", data if isinstance(data, list) else [])
+        for player in rankings_list:
+            name = player.get("player_name", "")
+            if name:
+                rankings[name] = {
+                    "dg_rank": player.get("datagolf_rank", 999),
+                    "owgr": player.get("owgr_rank", 999),
+                    "dg_skill": player.get("dg_skill_estimate", 0),
+                    "datagolf_id": str(player.get("dg_id", "")),
+                }
+        return rankings
+
     def get_field_updates(self, tour: str = "pga") -> List[str]:
         """Get current field for upcoming tournament."""
         data = self._request(
@@ -251,7 +289,7 @@ class DataGolfAPI:
         """
         data = self._request(
             "/preds/approach-skill",
-            params={"tour": tour, "file_format": "json"},
+            params={"file_format": "json"},
             cache_hours=24
         )
 
@@ -259,16 +297,18 @@ class DataGolfAPI:
             return {}
 
         approach_data = {}
-        for player in data.get("players", []):
+        # API uses 'data' key with field names like '50_100_fw_sg_per_shot'
+        players_list = data.get("data", [])
+        for player in players_list:
             name = player.get("player_name", "")
             if name:
                 approach_data[name] = ApproachBuckets(
-                    sg_50_100=player.get("sg_50_100", 0),
-                    sg_100_150=player.get("sg_100_150", 0),
-                    sg_150_200=player.get("sg_150_200", 0),
-                    sg_200_plus=player.get("sg_200_plus", 0),
-                    sg_fairway=player.get("sg_fairway", 0),
-                    sg_rough=player.get("sg_rough", 0),
+                    sg_50_100=player.get("50_100_fw_sg_per_shot", 0),
+                    sg_100_150=player.get("100_150_fw_sg_per_shot", 0),
+                    sg_150_200=player.get("150_200_fw_sg_per_shot", 0),
+                    sg_200_plus=player.get("over_200_fw_sg_per_shot", 0),
+                    sg_fairway=player.get("over_150_rgh_sg_per_shot", 0),  # Rough over 150
+                    sg_rough=player.get("under_150_rgh_sg_per_shot", 0),   # Rough under 150
                 )
         return approach_data
 
@@ -279,7 +319,7 @@ class DataGolfAPI:
         Returns dict of golfer_name -> {book: implied_prob, consensus: avg_prob}
         """
         data = self._request(
-            "/betting/outrights",
+            "/betting-tools/outrights",
             params={"tour": tour, "market": market, "file_format": "json"},
             cache_hours=1
         )
@@ -309,8 +349,8 @@ class DataGolfAPI:
         Useful for identifying relative value.
         """
         data = self._request(
-            "/betting/matchups",
-            params={"tour": tour, "file_format": "json"},
+            "/betting-tools/matchups",
+            params={"tour": tour, "market": "tournament_matchups", "file_format": "json"},
             cache_hours=1
         )
 
@@ -359,33 +399,97 @@ class DataGolfAPI:
                 }
         return projections
 
-    def get_course_fit_predictions(self, tour: str = "pga") -> Dict[str, float]:
+    def get_course_fit_predictions(self, tour: str = "pga", tournament_name: str = None) -> Dict[str, float]:
         """
-        Get course fit adjustments from Data Golf's baseline + course history & fit model.
+        Calculate course fit adjustments based on golfer skills matching course characteristics.
         Returns strokes gained adjustment per round based on course fit.
-        """
-        data = self._request(
-            "/preds/pre-tournament",
-            params={"tour": tour, "file_format": "json"},
-            cache_hours=1
-        )
 
-        if not data:
+        Uses local course profiles and golfer stats rather than Data Golf comparison
+        which often returns neutral fits.
+        """
+        try:
+            from config import get_course_profile, get_next_tournament, get_tournament_by_name
+        except ImportError:
+            from .config import get_course_profile, get_next_tournament, get_tournament_by_name
+
+        # Get the tournament to determine course
+        if tournament_name:
+            tournament = get_tournament_by_name(tournament_name)
+        else:
+            tournament = get_next_tournament()
+
+        if not tournament:
+            return {}
+
+        profile = get_course_profile(tournament.course)
+        if not profile:
+            return {}
+
+        # Get all golfers from database
+        golfers = self.db.get_all_golfers()
+        if not golfers:
             return {}
 
         fit_adjustments = {}
-        # Compare baseline vs baseline_history_fit to get course adjustment
-        baseline = {p.get("player_name"): p for p in data.get("baseline", [])}
-        baseline_fit = {p.get("player_name"): p for p in data.get("baseline_history_fit", [])}
 
-        for name, fit_data in baseline_fit.items():
-            base_data = baseline.get(name, {})
-            # Course fit adjustment = difference in expected position
-            base_pos = base_data.get("expected_place", 50)
-            fit_pos = fit_data.get("expected_place", 50)
-            # Convert position difference to approximate SG/round
-            # Rough estimate: 1 position = 0.03 SG/round
-            fit_adjustments[name] = (base_pos - fit_pos) * 0.03
+        for golfer in golfers:
+            stats = golfer.stats
+            if not stats:
+                continue
+
+            # Calculate fit score based on skill-course matching
+            total_adjustment = 0.0
+
+            # === DRIVING ===
+            # Tour average driving distance ~295 yards
+            if stats.driving_distance > 0:
+                dist_above_avg = (stats.driving_distance - 295) / 10
+                distance_fit = dist_above_avg * 0.15 * profile.driving_distance
+                total_adjustment += distance_fit
+
+            # Driving accuracy - tour average ~60%
+            if stats.driving_accuracy > 0:
+                acc_above_avg = (stats.driving_accuracy - 60) / 10
+                accuracy_fit = acc_above_avg * 0.12 * profile.driving_accuracy
+                total_adjustment += accuracy_fit
+
+            # === APPROACH ===
+            if stats.sg_approach != 0:
+                approach_weight = (profile.approach_long + profile.approach_mid + profile.approach_short) / 3
+                approach_fit = stats.sg_approach * 0.5 * approach_weight
+                total_adjustment += approach_fit
+
+            # Approach by yardage buckets
+            if stats.approach_buckets:
+                buckets = stats.approach_buckets
+                if buckets.sg_200_plus != 0 and profile.approach_long > 0.3:
+                    total_adjustment += buckets.sg_200_plus * 0.3 * profile.approach_long
+                if buckets.sg_100_150 != 0 and profile.approach_short > 0.3:
+                    total_adjustment += buckets.sg_100_150 * 0.25 * profile.approach_short
+
+            # === SHORT GAME ===
+            if stats.sg_around_green != 0:
+                total_adjustment += stats.sg_around_green * 0.4 * profile.around_green
+
+            # === PUTTING ===
+            if stats.sg_putting != 0:
+                total_adjustment += stats.sg_putting * 0.35 * profile.putting
+
+            # === WIND FACTOR ===
+            if profile.wind_factor > 0.5 and stats.driving_accuracy > 0:
+                wind_bonus = ((stats.driving_accuracy - 55) / 15) * 0.1 * profile.wind_factor
+                total_adjustment += wind_bonus
+
+            # === ROUGH PENALTY ===
+            if profile.rough_penalty > 0.5 and stats.driving_accuracy > 0:
+                rough_impact = ((stats.driving_accuracy - 60) / 20) * 0.15 * profile.rough_penalty
+                total_adjustment += rough_impact
+
+            # Cap adjustment to reasonable range
+            total_adjustment = max(-0.8, min(0.8, total_adjustment))
+
+            if total_adjustment != 0:
+                fit_adjustments[golfer.name] = total_adjustment
 
         return fit_adjustments
 
@@ -423,11 +527,19 @@ class DataGolfAPI:
         Sync golfer data from API to database.
         Returns number of golfers synced.
         """
+        # Clear stale simulation cache when syncing new data
+        cleared = self.db.clear_simulation_cache()
+        if cleared > 0:
+            logger.info(f"Cleared {cleared} stale simulation cache entries")
+
         # Get player list
         players = self.get_player_list()
         if not players:
             logger.warning("No players returned from API")
             return 0
+
+        # Get Data Golf rankings (has proper OWGR data)
+        dg_rankings = self.get_dg_rankings()
 
         # Get skill ratings
         skills = self.get_skill_ratings()
@@ -438,6 +550,13 @@ class DataGolfAPI:
         # Get course fit adjustments
         course_fits = self.get_course_fit_predictions()
 
+        # Get predictions as fallback for OWGR
+        predictions = self.get_pre_tournament_predictions()
+        pred_ranking = {}
+        sorted_preds = sorted(predictions, key=lambda p: p.win_prob, reverse=True)
+        for rank, pred in enumerate(sorted_preds, 1):
+            pred_ranking[pred.golfer_name] = rank
+
         count = 0
         for player in players:
             name = player["name"]
@@ -445,9 +564,17 @@ class DataGolfAPI:
             approach_data = approach_skills.get(name)
             course_fit = course_fits.get(name, 0)
 
+            # Priority for OWGR: 1) DG Rankings, 2) Player List, 3) Prediction ranking
+            dg_rank_data = dg_rankings.get(name, {})
+            owgr = dg_rank_data.get("owgr", 999)
+            if owgr == 999 or owgr is None:
+                owgr = player.get("owgr", 999)
+            if owgr == 999 or owgr is None:
+                owgr = pred_ranking.get(name, 999)
+
             golfer = Golfer(
                 name=name,
-                owgr=player.get("owgr", 999),
+                owgr=owgr,
                 datagolf_id=player.get("datagolf_id"),
                 stats=GolferStats(
                     sg_total=skill_data.get("sg_total", 0),

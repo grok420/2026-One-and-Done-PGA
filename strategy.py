@@ -12,7 +12,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 try:
-    from .config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events
+    from .config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events, get_course_profile, CourseProfile
     from .database import Database
     from .models import (
         Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
@@ -21,7 +21,7 @@ try:
     from .simulator import Simulator
     from .api import DataGolfAPI
 except ImportError:
-    from config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events
+    from config import get_config, get_schedule, get_next_tournament, get_majors, get_no_cut_events, get_course_profile, CourseProfile
     from database import Database
     from models import (
         Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
@@ -32,6 +32,14 @@ except ImportError:
 
 # OWGR threshold for warnings - last year's winner never picked outside top 65
 OWGR_WARNING_THRESHOLD = 65
+
+# Tournament value thresholds (purse in millions)
+HIGH_VALUE_PURSE = 15_000_000  # Majors, Players, signatures
+MID_VALUE_PURSE = 10_000_000   # Strong regular events
+BASE_PURSE = 8_000_000         # Standard events
+
+# Strategy insight: 65% of season earnings come from best 5 events
+# Winners at majors earn $3-4.5M vs $1-2M at regular events
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +86,269 @@ class Strategy:
         if golfer.owgr > OWGR_WARNING_THRESHOLD:
             return True, f"OWGR {golfer.owgr} is outside top {OWGR_WARNING_THRESHOLD} - historical winners avoid these picks"
         return False, ""
+
+    def calculate_course_fit(self, golfer: Golfer, tournament: Tournament) -> Tuple[float, str]:
+        """
+        Calculate course fit adjustment (strokes gained per round) based on
+        golfer skills matching course characteristics.
+
+        Research basis (Data Golf, PGA Tour stats):
+        - Approach shots account for ~40% of scoring advantage
+        - Driving accounts for ~28%
+        - Short game for ~17%
+        - Putting for ~15%
+        - Long courses favor bombers (+0.19 SG/round per 10 yards above avg)
+        - Narrow courses favor accuracy players
+
+        Returns (sg_adjustment, explanation)
+        """
+        profile = get_course_profile(tournament.course)
+        if not profile:
+            return 0.0, "No course profile available"
+
+        stats = golfer.stats
+        if not stats:
+            return 0.0, "No golfer stats available"
+
+        # Calculate fit score based on skill-course matching
+        fit_components = []
+        total_adjustment = 0.0
+
+        # === DRIVING ===
+        # Tour average driving distance ~295 yards
+        # Each 10 yards above average = ~0.15-0.20 SG/round at long courses
+        if stats.driving_distance > 0:
+            dist_above_avg = (stats.driving_distance - 295) / 10
+            distance_fit = dist_above_avg * 0.15 * profile.driving_distance
+            total_adjustment += distance_fit
+            if abs(distance_fit) > 0.05:
+                if distance_fit > 0:
+                    fit_components.append(f"Distance +{distance_fit:.2f}")
+                else:
+                    fit_components.append(f"Distance {distance_fit:.2f}")
+
+        # Driving accuracy - tour average ~60%
+        if stats.driving_accuracy > 0:
+            acc_above_avg = (stats.driving_accuracy - 60) / 10  # Per 10% above average
+            accuracy_fit = acc_above_avg * 0.12 * profile.driving_accuracy
+            total_adjustment += accuracy_fit
+            if abs(accuracy_fit) > 0.05:
+                if accuracy_fit > 0:
+                    fit_components.append(f"Accuracy +{accuracy_fit:.2f}")
+                else:
+                    fit_components.append(f"Accuracy {accuracy_fit:.2f}")
+
+        # === APPROACH (40% of scoring - most important) ===
+        # Use SG:Approach directly, weighted by course approach profile
+        if stats.sg_approach != 0:
+            # Weight approach importance: avg of long/mid/short weights
+            approach_weight = (profile.approach_long + profile.approach_mid + profile.approach_short) / 3
+            approach_fit = stats.sg_approach * 0.5 * approach_weight
+            total_adjustment += approach_fit
+            if abs(approach_fit) > 0.05:
+                if approach_fit > 0:
+                    fit_components.append(f"Approach +{approach_fit:.2f}")
+                else:
+                    fit_components.append(f"Approach {approach_fit:.2f}")
+
+        # Approach by yardage buckets (if available)
+        if stats.approach_buckets:
+            buckets = stats.approach_buckets
+            # Long approach (200+ yards) - important at bomber courses
+            if buckets.sg_200_plus != 0 and profile.approach_long > 0.3:
+                long_fit = buckets.sg_200_plus * 0.3 * profile.approach_long
+                total_adjustment += long_fit
+                if abs(long_fit) > 0.05:
+                    fit_components.append(f"Long approach {'+' if long_fit > 0 else ''}{long_fit:.2f}")
+
+            # Short approach (100-150) - important at precision courses
+            if buckets.sg_100_150 != 0 and profile.approach_short > 0.3:
+                short_fit = buckets.sg_100_150 * 0.25 * profile.approach_short
+                total_adjustment += short_fit
+                if abs(short_fit) > 0.05:
+                    fit_components.append(f"Short approach {'+' if short_fit > 0 else ''}{short_fit:.2f}")
+
+        # === SHORT GAME ===
+        if stats.sg_around_green != 0:
+            arg_fit = stats.sg_around_green * 0.4 * profile.around_green
+            total_adjustment += arg_fit
+            if abs(arg_fit) > 0.05:
+                if arg_fit > 0:
+                    fit_components.append(f"Short game +{arg_fit:.2f}")
+                else:
+                    fit_components.append(f"Short game {arg_fit:.2f}")
+
+        # === PUTTING ===
+        if stats.sg_putting != 0:
+            putt_fit = stats.sg_putting * 0.35 * profile.putting
+            total_adjustment += putt_fit
+            if abs(putt_fit) > 0.05:
+                if putt_fit > 0:
+                    fit_components.append(f"Putting +{putt_fit:.2f}")
+                else:
+                    fit_components.append(f"Putting {putt_fit:.2f}")
+
+        # === WIND FACTOR ===
+        # Players with low ball flight / links experience do better in wind
+        # Approximate: accuracy players handle wind better
+        if profile.wind_factor > 0.5 and stats.driving_accuracy > 0:
+            wind_bonus = ((stats.driving_accuracy - 55) / 15) * 0.1 * profile.wind_factor
+            total_adjustment += wind_bonus
+            if abs(wind_bonus) > 0.05:
+                fit_components.append(f"Wind handling {'+' if wind_bonus > 0 else ''}{wind_bonus:.2f}")
+
+        # === ROUGH PENALTY ===
+        # Players who miss fairways suffer more at courses with penal rough
+        if profile.rough_penalty > 0.5 and stats.driving_accuracy > 0:
+            # Players below average accuracy get penalized at tough rough courses
+            rough_impact = ((stats.driving_accuracy - 60) / 20) * 0.15 * profile.rough_penalty
+            total_adjustment += rough_impact
+            if rough_impact < -0.05:
+                fit_components.append(f"Rough penalty {rough_impact:.2f}")
+
+        # Build explanation
+        if fit_components:
+            explanation = f"{tournament.course}: {', '.join(fit_components)}"
+        else:
+            explanation = f"{tournament.course}: Neutral fit"
+
+        # Cap adjustment to reasonable range (-0.8 to +0.8 SG/round)
+        total_adjustment = max(-0.8, min(0.8, total_adjustment))
+
+        return total_adjustment, explanation
+
+    def calculate_tournament_value_factor(self, tournament: Tournament) -> float:
+        """
+        Calculate how valuable this tournament is for deploying elite picks.
+        Higher value = save your best golfers for these events.
+
+        Key insight: 65% of season earnings come from best 5 events.
+        Winners at majors earn $3-4.5M vs $1-2M at regular events.
+        """
+        base_factor = 1.0
+
+        # Purse-based value (bigger purse = more valuable)
+        purse_factor = tournament.purse / BASE_PURSE
+
+        # Tournament type bonuses
+        if tournament.is_major:
+            # Majors are THE events to deploy elites - winner gets $3.6-4.5M
+            type_bonus = 2.0
+        elif tournament.is_signature:
+            # Signature events have $20M purses, winners get $3.6M
+            type_bonus = 1.75
+        elif tournament.is_playoff:
+            # FedEx Playoffs - Tour Championship is huge
+            type_bonus = 1.6
+        elif tournament.tier == Tier.TIER_1:
+            type_bonus = 1.3
+        else:
+            type_bonus = 1.0
+
+        return base_factor * purse_factor * type_bonus
+
+    def should_save_elite(self, golfer: Golfer, tournament: Tournament) -> Tuple[bool, str]:
+        """
+        Determine if an elite golfer should be saved for a better tournament.
+        Returns (should_save, reason).
+        """
+        if self.classify_golfer_tier(golfer) != "elite":
+            return False, ""
+
+        phase = self.get_current_phase()
+        schedule = get_schedule()
+        today = tournament.date
+
+        # Get upcoming high-value tournaments
+        upcoming_majors = [t for t in schedule if t.date > today and t.is_major]
+        upcoming_signatures = [t for t in schedule if t.date > today and t.is_signature]
+
+        tournament_value = self.calculate_tournament_value_factor(tournament)
+
+        # Early season with majors ahead - save elites
+        if phase == SeasonPhase.EARLY:
+            if upcoming_majors and tournament_value < 1.5:
+                return True, f"Save for upcoming majors ({len(upcoming_majors)} remaining)"
+
+        # Mid season - only use elites at majors/signatures
+        if phase == SeasonPhase.MID:
+            if not tournament.is_major and not tournament.is_signature:
+                if upcoming_majors:
+                    return True, f"Reserve for majors ({upcoming_majors[0].name} coming up)"
+
+        # If this is a low-value event with elites still needed
+        if tournament_value < 1.2 and len(upcoming_majors) + len(upcoming_signatures) > 0:
+            return True, "Low-value event - save elite for high-purse tournaments"
+
+        return False, ""
+
+    def calculate_win_probability_value(
+        self,
+        golfer: Golfer,
+        tournament: Tournament,
+        sim_result
+    ) -> Tuple[float, str]:
+        """
+        Calculate the value of a golfer's win probability at this tournament.
+
+        Key insight: 65% of winning entries' points come from ~5 events.
+        Those are almost always tournament WINS at high-purse events.
+
+        High win probability is worth MORE at high-purse events.
+        Wasting high win probability at low-purse events is a strategic mistake.
+
+        Returns (win_value_multiplier, explanation).
+        """
+        win_prob = sim_result.win_rate
+        winner_share = tournament.winner_share
+
+        # Calculate the "win opportunity value" - what this win prob is worth here
+        win_opportunity = win_prob * winner_share
+
+        # Compare to what this golfer's win prob would be worth at a major
+        # (Assuming similar win probability, which is generous)
+        avg_major_winner_share = 4_000_000  # ~$4M for major winners
+        major_opportunity = win_prob * avg_major_winner_share
+
+        # Calculate opportunity cost ratio
+        opportunity_ratio = win_opportunity / major_opportunity if major_opportunity > 0 else 1.0
+
+        # Win probability tiers and their strategic value
+        if win_prob >= 0.15:  # 15%+ win probability = elite
+            tier = "ELITE_WIN_PROB"
+            # Elite win prob at low-value event is a waste
+            if tournament.purse < 12_000_000 and not tournament.is_major:
+                multiplier = 0.6 + (opportunity_ratio * 0.4)  # 60-100% based on purse
+                explanation = f"HIGH WIN PROB ({win_prob*100:.1f}%) - worth ${win_opportunity:,.0f} here vs ${major_opportunity:,.0f} at major"
+            else:
+                multiplier = 1.0 + (win_prob * 0.5)  # Bonus for deploying at right time
+                explanation = f"DEPLOY HIGH WIN PROB ({win_prob*100:.1f}%) at high-value event"
+
+        elif win_prob >= 0.08:  # 8-15% = strong
+            tier = "STRONG_WIN_PROB"
+            if tournament.is_major or tournament.is_signature:
+                multiplier = 1.0 + (win_prob * 0.3)  # Small bonus at big events
+                explanation = f"Good win chance ({win_prob*100:.1f}%) at premium event"
+            else:
+                multiplier = 1.0
+                explanation = f"Solid win chance ({win_prob*100:.1f}%)"
+
+        elif win_prob >= 0.03:  # 3-8% = moderate
+            tier = "MODERATE_WIN_PROB"
+            multiplier = 1.0
+            explanation = f"Moderate win chance ({win_prob*100:.1f}%)"
+
+        else:  # < 3% = longshot
+            tier = "LONGSHOT"
+            # Longshots are fine at regular events, not at majors
+            if tournament.is_major:
+                multiplier = 0.85  # Penalty for wasting major on longshot
+                explanation = f"LOW WIN PROB ({win_prob*100:.1f}%) - consider saving major slot"
+            else:
+                multiplier = 1.0
+                explanation = f"Longshot ({win_prob*100:.1f}%) - acceptable at regular event"
+
+        return multiplier, explanation
 
     def calculate_no_cut_ev(self, golfer: Golfer, tournament: Tournament) -> float:
         """
@@ -253,6 +524,10 @@ class Strategy:
 
         recommendations = []
 
+        # Calculate tournament value for context
+        tournament_value = self.calculate_tournament_value_factor(tournament)
+        is_high_value_event = tournament.is_major or tournament.is_signature or tournament.purse >= HIGH_VALUE_PURSE
+
         for golfer in golfers:
             # Run simulation
             sim_result = self.simulator.simulate_tournament(golfer, tournament)
@@ -279,26 +554,75 @@ class Strategy:
             else:
                 base_ev = sim_result.mean_earnings
 
-            # Final EV with hedge bonus and phase multiplier
-            expected_value = base_ev * hedge_bonus * phase_multiplier
+            # Apply tournament value adjustment for elite golfers
+            # Penalize using elites at low-value events, reward at high-value events
+            golfer_tier = self.classify_golfer_tier(golfer)
+            elite_save_penalty = 1.0
+            if golfer_tier == "elite":
+                should_save, save_reason = self.should_save_elite(golfer, tournament)
+                if should_save and not is_high_value_event:
+                    elite_save_penalty = 0.7  # 30% penalty for wasting elite
+                elif is_high_value_event:
+                    elite_save_penalty = 1.15  # 15% bonus for proper elite deployment
+
+            # KEY INSIGHT: Win probability matters more than average EV
+            # 65% of winning entries' points come from ~5 events (wins at big purses)
+            # High win prob at low-purse event = strategic waste
+            win_prob_multiplier, win_prob_explanation = self.calculate_win_probability_value(
+                golfer, tournament, sim_result
+            )
+
+            # Calculate course fit adjustment
+            course_fit, course_fit_explanation = self.calculate_course_fit(golfer, tournament)
+
+            # Convert course fit SG/round to EV adjustment
+            # Rough estimate: 1 SG/round improvement = ~3 positions better finish
+            # 3 positions better = ~$50K-100K more earnings at typical event
+            course_fit_ev_factor = 1.0 + (course_fit * 0.08)  # 8% EV adjustment per SG
+
+            # Final score combines:
+            # - Base EV (simulation mean)
+            # - Win probability value (don't waste high win% at small events)
+            # - Hedge bonus (differentiation from opponents)
+            # - Phase multiplier (save elites early, deploy late)
+            # - Elite deployment factor
+            # - Course fit adjustment
+            expected_value = base_ev * win_prob_multiplier * hedge_bonus * phase_multiplier * elite_save_penalty * course_fit_ev_factor
 
             # Check OWGR warning
             owgr_warning, owgr_msg = self.check_owgr_warning(golfer)
 
-            # Build reasoning (include OWGR warning if applicable)
+            # Build reasoning (include OWGR warning and elite save advice if applicable)
             reasoning = self._build_reasoning(
                 golfer, tournament, sim_result, hedge_bonus, phase, regret_risk
             )
             if owgr_warning:
                 reasoning = f"WARNING: {owgr_msg} | {reasoning}"
 
+            # Add win probability strategic advice for high win% golfers
+            if sim_result.win_rate >= 0.10:  # 10%+ win probability
+                if not is_high_value_event:
+                    reasoning = f"WIN PROB ALERT: {win_prob_explanation} | {reasoning}"
+                else:
+                    reasoning = f"GOOD DEPLOYMENT: {win_prob_explanation} | {reasoning}"
+
+            # Add elite deployment advice
+            if golfer_tier == "elite":
+                should_save, save_reason = self.should_save_elite(golfer, tournament)
+                if should_save:
+                    reasoning = f"CONSIDER SAVING: {save_reason} | {reasoning}"
+                elif is_high_value_event:
+                    reasoning = f"DEPLOY NOW: High-value event (${tournament.purse/1_000_000:.0f}M purse) | {reasoning}"
+
             # Confidence score (0-1) - reduce for OWGR warning
             confidence = self._calculate_confidence(golfer, sim_result)
             if owgr_warning:
                 confidence *= 0.8  # 20% confidence penalty for OWGR risk
 
-            # Course fit bonus display
-            course_fit = golfer.course_fit_adjustment
+            # Add course fit to reasoning if significant
+            if abs(course_fit) >= 0.1:
+                fit_sign = "+" if course_fit > 0 else ""
+                reasoning = f"COURSE FIT: {fit_sign}{course_fit:.2f} SG/rd ({course_fit_explanation}) | {reasoning}"
 
             rec = Recommendation(
                 golfer=golfer,
@@ -390,6 +714,15 @@ class Strategy:
             parts.append(f"NO-CUT (Min: ${tournament.min_payout:,.0f})")
         else:
             parts.append(f"Cut: {sim.cut_rate*100:.0f}%")
+
+        # Tournament value indicator
+        tournament_value = self.calculate_tournament_value_factor(tournament)
+        if tournament.is_major:
+            parts.append("MAJOR")
+        elif tournament.is_signature:
+            parts.append("SIGNATURE")
+        elif tournament_value >= 1.5:
+            parts.append("HIGH-VALUE")
 
         # Tier and phase
         tier = self.classify_golfer_tier(golfer)

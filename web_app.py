@@ -620,10 +620,15 @@ def show_betting_odds():
 
     with tab3:
         st.subheader("Course Fit Adjustments")
-        st.markdown("How much a player gains/loses (SG/round) based on course fit for the current event.")
+
+        # Show which tournament/course is being analyzed
+        next_t = get_next_tournament()
+        if next_t:
+            st.info(f"**Analyzing:** {next_t.name} at **{next_t.course}** ({next_t.date.strftime('%B %d, %Y')})")
+        st.markdown("How much a player gains/loses (SG/round) based on their skills matching the course characteristics.")
 
         if st.button("Load Course Fit Data", key="load_fit"):
-            with st.spinner("Fetching course fit predictions..."):
+            with st.spinner("Calculating course fit based on player skills..."):
                 fit_data = api.get_course_fit_predictions()
 
             if fit_data:

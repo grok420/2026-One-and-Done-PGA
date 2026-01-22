@@ -569,6 +569,13 @@ class Database:
                 )
         return None
 
+    def clear_simulation_cache(self) -> int:
+        """Clear all cached simulation results."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM simulations")
+            return cursor.rowcount
+
     # =========================================================================
     # Golfer probabilities operations
     # =========================================================================
@@ -674,6 +681,27 @@ class Database:
                 "DELETE FROM cache WHERE expires_at < ?",
                 (datetime.now().isoformat(),)
             )
+
+    def clear_all_api_cache(self) -> int:
+        """Clear all API-related cache entries."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM cache WHERE key LIKE 'datagolf:%'")
+            return cursor.rowcount
+
+    def get_golfer_count(self) -> int:
+        """Get total number of golfers in database."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM golfers")
+            return cursor.fetchone()[0]
+
+    def get_valid_owgr_count(self) -> int:
+        """Get count of golfers with valid OWGR (not 999)."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM golfers WHERE owgr < 999")
+            return cursor.fetchone()[0]
 
     # =========================================================================
     # Utility operations
