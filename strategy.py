@@ -393,6 +393,143 @@ class Strategy:
         else:  # Early season
             return 1.0
 
+    def get_standings_strategy(self) -> Tuple[str, float, str]:
+        """
+        Determine strategy adjustment based on current standings position.
+
+        Research insight: "If you are leading, matching popular high-upside picks
+        can protect your position. If you are trailing, you may need to accept
+        more risk and fade popular options."
+
+        Returns (strategy_mode, risk_multiplier, explanation)
+        """
+        standings = self.db.get_latest_standings()
+        if not standings:
+            return "neutral", 1.0, "No standings data - using balanced strategy"
+
+        config = get_config()
+        my_username = config.site_username.lower()
+
+        # Find my position
+        my_standing = None
+        total_entries = len(standings)
+        for s in standings:
+            if s.username.lower() == my_username:
+                my_standing = s
+                break
+
+        if not my_standing:
+            return "neutral", 1.0, "Not found in standings - using balanced strategy"
+
+        percentile = (my_standing.rank / total_entries) * 100
+
+        if percentile <= 10:  # Top 10% - PROTECT
+            return "protect", 0.8, f"Top 10% (#{my_standing.rank}) - Match popular picks, reduce variance"
+        elif percentile <= 25:  # Top 25% - HOLD
+            return "hold", 0.95, f"Top 25% (#{my_standing.rank}) - Balanced approach, slight risk reduction"
+        elif percentile <= 50:  # Middle - NEUTRAL
+            return "neutral", 1.0, f"Middle of pack (#{my_standing.rank}) - Standard EV maximization"
+        elif percentile <= 75:  # Bottom half - AGGRESSIVE
+            return "aggressive", 1.15, f"Bottom half (#{my_standing.rank}) - Need upside, fade popular picks"
+        else:  # Bottom 25% - DESPERATION
+            return "desperation", 1.3, f"Bottom 25% (#{my_standing.rank}) - High-risk required, contrarian picks"
+
+    # Known LIV Golf players (only eligible for majors)
+    LIV_GOLFERS = {
+        "Rahm, Jon", "DeChambeau, Bryson", "Koepka, Brooks", "Johnson, Dustin",
+        "Reed, Patrick", "Mickelson, Phil", "Garcia, Sergio", "Poulter, Ian",
+        "Westwood, Lee", "Stenson, Henrik", "Smith, Cameron", "Gooch, Talor",
+        "Niemann, Joaquin", "Ancer, Abraham", "Ortiz, Carlos", "Wolff, Matthew",
+        "Swafford, Hudson", "Na, Kevin", "Finau, Tony", "Hatton, Tyrrell"
+    }
+
+    def is_liv_golfer(self, golfer_name: str) -> bool:
+        """Check if golfer plays on LIV Golf (only available at majors)."""
+        return golfer_name in self.LIV_GOLFERS
+
+    def check_liv_warning(self, golfer: Golfer, tournament: Tournament) -> Tuple[bool, str]:
+        """
+        Check if picking a LIV golfer at a non-major.
+
+        Research insight: "The only opportunities to use LIV golfers like
+        Jon Rahm and Bryson DeChambeau is at the four majors."
+
+        Returns (is_warning, warning_message)
+        """
+        if not self.is_liv_golfer(golfer.name):
+            return False, ""
+
+        if tournament.is_major:
+            return False, ""  # OK to use LIV golfers at majors
+
+        return True, f"LIV golfer - only available at majors (save for Masters, PGA, US Open, Open Championship)"
+
+    def get_season_win_targets(self) -> Dict:
+        """
+        Track progress toward winning blueprint: 4-6 winners, double top-5s.
+
+        Research insight: "4-6 winners with close to double Top 5 finishes
+        was the 2025 Blueprint."
+        """
+        picks = self.db.get_all_picks()
+
+        wins = 0
+        top_5s = 0
+        top_10s = 0
+        total_earnings = 0
+
+        for pick in picks:
+            if pick.position:
+                if pick.position == 1:
+                    wins += 1
+                if pick.position <= 5:
+                    top_5s += 1
+                if pick.position <= 10:
+                    top_10s += 1
+            total_earnings += pick.earnings
+
+        # Calculate targets and progress
+        target_wins = 5  # Middle of 4-6 range
+        target_top_5s = wins * 2 + 4  # Double wins + buffer
+
+        return {
+            "wins": wins,
+            "top_5s": top_5s,
+            "top_10s": top_10s,
+            "total_earnings": total_earnings,
+            "target_wins": target_wins,
+            "target_top_5s": target_top_5s,
+            "wins_on_track": wins >= 0,  # Will be calculated based on schedule progress
+            "top_5s_on_track": top_5s >= wins * 2,
+            "analysis": self._analyze_win_progress(wins, top_5s, total_earnings)
+        }
+
+    def _analyze_win_progress(self, wins: int, top_5s: int, earnings: int) -> str:
+        """Analyze season progress toward winning targets."""
+        schedule = get_schedule()
+        today = date.today()
+        completed = len([t for t in schedule if t.date < today])
+        total = len(schedule)
+        progress_pct = (completed / total * 100) if total > 0 else 0
+
+        # Expected wins at this point (target 5 for season)
+        expected_wins = (progress_pct / 100) * 5
+
+        if wins >= expected_wins + 1:
+            status = "AHEAD"
+            advice = "Strong position - can take slightly safer picks to protect lead"
+        elif wins >= expected_wins:
+            status = "ON TRACK"
+            advice = "Maintain balanced strategy - continue targeting high-EV picks"
+        elif wins >= expected_wins - 1:
+            status = "SLIGHTLY BEHIND"
+            advice = "Need a breakthrough - consider higher-upside picks at big events"
+        else:
+            status = "BEHIND"
+            advice = "Aggressive strategy needed - prioritize win probability at remaining majors/signatures"
+
+        return f"{status}: {wins} wins ({progress_pct:.0f}% through season). {advice}"
+
     def get_opponent_usage_stats(self) -> Dict[str, Dict]:
         """Analyze opponent usage patterns."""
         all_picks = self.db.get_opponent_picks()
@@ -522,6 +659,10 @@ class Strategy:
         phase = self.get_current_phase()
         league_size = len(self.db.get_latest_standings()) or 80
 
+        # Get standings-based strategy adjustment
+        standings_mode, standings_risk_mult, standings_explanation = self.get_standings_strategy()
+        logger.info(f"Standings strategy: {standings_mode} ({standings_explanation})")
+
         recommendations = []
 
         # Calculate tournament value for context
@@ -529,6 +670,11 @@ class Strategy:
         is_high_value_event = tournament.is_major or tournament.is_signature or tournament.purse >= HIGH_VALUE_PURSE
 
         for golfer in golfers:
+            # Check for LIV golfer at non-major (skip with warning)
+            liv_warning, liv_msg = self.check_liv_warning(golfer, tournament)
+            if liv_warning:
+                logger.info(f"Skipping {golfer.name}: {liv_msg}")
+                continue  # Don't recommend LIV golfers for non-majors
             # Run simulation
             sim_result = self.simulator.simulate_tournament(golfer, tournament)
 
@@ -580,6 +726,17 @@ class Strategy:
             # 3 positions better = ~$50K-100K more earnings at typical event
             course_fit_ev_factor = 1.0 + (course_fit * 0.08)  # 8% EV adjustment per SG
 
+            # Apply standings-based risk adjustment
+            # If trailing: boost high-variance plays
+            # If leading: favor safer picks
+            standings_adjustment = 1.0
+            if standings_mode == "protect" and sim_result.win_rate < 0.05:
+                standings_adjustment = 1.05  # Slight boost to safer picks when leading
+            elif standings_mode == "aggressive" and sim_result.win_rate > 0.08:
+                standings_adjustment = 1.1  # Boost high-upside picks when trailing
+            elif standings_mode == "desperation" and sim_result.win_rate > 0.10:
+                standings_adjustment = 1.2  # Big boost to win probability when far behind
+
             # Final score combines:
             # - Base EV (simulation mean)
             # - Win probability value (don't waste high win% at small events)
@@ -587,7 +744,8 @@ class Strategy:
             # - Phase multiplier (save elites early, deploy late)
             # - Elite deployment factor
             # - Course fit adjustment
-            expected_value = base_ev * win_prob_multiplier * hedge_bonus * phase_multiplier * elite_save_penalty * course_fit_ev_factor
+            # - Standings-based risk adjustment
+            expected_value = base_ev * win_prob_multiplier * hedge_bonus * phase_multiplier * elite_save_penalty * course_fit_ev_factor * standings_adjustment
 
             # Check OWGR warning
             owgr_warning, owgr_msg = self.check_owgr_warning(golfer)
@@ -623,6 +781,13 @@ class Strategy:
             if abs(course_fit) >= 0.1:
                 fit_sign = "+" if course_fit > 0 else ""
                 reasoning = f"COURSE FIT: {fit_sign}{course_fit:.2f} SG/rd ({course_fit_explanation}) | {reasoning}"
+
+            # Add standings context if adjusting strategy
+            if standings_adjustment != 1.0:
+                if standings_mode == "protect":
+                    reasoning = f"STANDINGS: Protecting lead - favor consistency | {reasoning}"
+                elif standings_mode in ("aggressive", "desperation"):
+                    reasoning = f"STANDINGS: Trailing - need upside ({standings_adjustment:.0%} boost) | {reasoning}"
 
             rec = Recommendation(
                 golfer=golfer,

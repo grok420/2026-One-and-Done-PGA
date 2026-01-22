@@ -216,6 +216,47 @@ def show_dashboard():
     progress = completed / total if total > 0 else 0
     st.progress(progress, text=f"{completed}/{total} tournaments completed ({progress*100:.0f}%)")
 
+    # Win Target Tracking (2025 Blueprint: 4-6 wins, double top-5s)
+    st.subheader("Win Target Tracking")
+    st.caption("2025 Blueprint: 4-6 wins with close to double Top 5 finishes")
+
+    strategy = st.session_state.strategy
+    win_stats = strategy.get_season_win_targets()
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        target_wins = 5
+        win_color = "normal" if win_stats["wins"] >= (progress * target_wins) else "inverse"
+        st.metric("Wins", win_stats["wins"], delta=f"Target: {target_wins}", delta_color=win_color)
+    with col2:
+        st.metric("Top 5s", win_stats["top_5s"], delta=f"Need: {win_stats['wins'] * 2}")
+    with col3:
+        st.metric("Top 10s", win_stats["top_10s"])
+    with col4:
+        st.metric("Earnings", f"${win_stats['total_earnings']:,}")
+
+    # Win progress analysis
+    if win_stats["analysis"]:
+        if "AHEAD" in win_stats["analysis"]:
+            st.success(win_stats["analysis"])
+        elif "ON TRACK" in win_stats["analysis"]:
+            st.info(win_stats["analysis"])
+        elif "BEHIND" in win_stats["analysis"]:
+            st.warning(win_stats["analysis"])
+        else:
+            st.info(win_stats["analysis"])
+
+    # Standings-based strategy
+    st.subheader("Strategy Mode")
+    standings_mode, standings_mult, standings_explanation = strategy.get_standings_strategy()
+
+    if standings_mode == "protect":
+        st.success(f"**{standings_mode.upper()}**: {standings_explanation}")
+    elif standings_mode in ("aggressive", "desperation"):
+        st.warning(f"**{standings_mode.upper()}**: {standings_explanation}")
+    else:
+        st.info(f"**{standings_mode.upper()}**: {standings_explanation}")
+
 
 def show_recommendations():
     """Detailed pick recommendations with backups."""
