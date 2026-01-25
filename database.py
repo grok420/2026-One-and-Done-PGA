@@ -13,13 +13,15 @@ from contextlib import contextmanager
 try:
     from .models import (
         Tournament, Golfer, GolferStats, Pick, LeagueStanding,
-        OpponentPick, SimulationResult, Tier
+        OpponentPick, SimulationResult, Tier, CourseHistory,
+        GolferAvailability, SeasonPlanEntry, Entry
     )
     from .config import get_config
 except ImportError:
     from models import (
         Tournament, Golfer, GolferStats, Pick, LeagueStanding,
-        OpponentPick, SimulationResult, Tier
+        OpponentPick, SimulationResult, Tier, CourseHistory,
+        GolferAvailability, SeasonPlanEntry, Entry
     )
     from config import get_config
 
@@ -207,6 +209,186 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     golfer_name TEXT NOT NULL UNIQUE,
                     updated_at TEXT
+                )
+            """)
+
+            # Course history (Phase 2.1)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS course_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    golfer_name TEXT NOT NULL,
+                    course_name TEXT NOT NULL,
+                    tournament_name TEXT NOT NULL,
+                    year INTEGER NOT NULL,
+                    finish_position INTEGER,
+                    earnings INTEGER DEFAULT 0,
+                    sg_total REAL DEFAULT 0,
+                    made_cut INTEGER DEFAULT 1,
+                    created_at TEXT,
+                    UNIQUE(golfer_name, course_name, year)
+                )
+            """)
+
+            # Golfer availability (Phase 2.2)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS golfer_availability (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    golfer_name TEXT NOT NULL,
+                    tournament_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    probability REAL DEFAULT 0,
+                    updated_at TEXT,
+                    UNIQUE(golfer_name, tournament_name)
+                )
+            """)
+
+            # Season plan (Phase 2.3)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS season_plan (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id INTEGER DEFAULT 1,
+                    tournament_name TEXT NOT NULL,
+                    tournament_date TEXT NOT NULL,
+                    golfer_name TEXT,
+                    is_tentative INTEGER DEFAULT 1,
+                    projected_ev REAL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    UNIQUE(entry_id, tournament_name)
+                )
+            """)
+
+            # Multi-entry support (Phase 3.2)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_name TEXT NOT NULL UNIQUE,
+                    created_at TEXT
+                )
+            """)
+
+            # Entry picks - separate pick tracking per entry (Phase 3.2)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS entry_picks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id INTEGER NOT NULL,
+                    golfer_name TEXT NOT NULL,
+                    tournament_name TEXT NOT NULL,
+                    tournament_date TEXT NOT NULL,
+                    earnings INTEGER DEFAULT 0,
+                    position INTEGER,
+                    made_cut INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    UNIQUE(entry_id, tournament_name),
+                    FOREIGN KEY (entry_id) REFERENCES entries(id)
+                )
+            """)
+
+            # =========================================================================
+            # Learning Feature Tables
+            # =========================================================================
+
+            # Pick outcomes - Track predictions vs actual results for learning
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pick_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    golfer_name TEXT NOT NULL,
+                    tournament_name TEXT NOT NULL,
+                    tournament_date TEXT,
+                    purse INTEGER,
+                    predicted_win_prob REAL,
+                    predicted_top10_prob REAL,
+                    predicted_ev REAL,
+                    predicted_course_fit REAL,
+                    strategic_score REAL,
+                    was_save_warning INTEGER DEFAULT 0,
+                    actual_position INTEGER,
+                    actual_earnings INTEGER,
+                    made_cut INTEGER,
+                    was_my_pick INTEGER DEFAULT 0,
+                    outcome_recorded INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    outcome_recorded_at TEXT,
+                    UNIQUE(golfer_name, tournament_name, tournament_date)
+                )
+            """)
+
+            # Learned course fits - Calibrated weights based on real outcomes
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS learned_course_fits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tournament_name TEXT NOT NULL,
+                    skill_name TEXT NOT NULL,
+                    static_weight REAL,
+                    learned_weight REAL,
+                    confidence REAL DEFAULT 0.5,
+                    sample_size INTEGER DEFAULT 0,
+                    last_updated TEXT,
+                    UNIQUE(tournament_name, skill_name)
+                )
+            """)
+
+            # Learned elite tiers - Dynamic tier adjustments based on performance
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS learned_elite_tiers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    golfer_name TEXT NOT NULL UNIQUE,
+                    static_tier INTEGER,
+                    learned_tier INTEGER,
+                    performance_score REAL,
+                    tier_confidence REAL DEFAULT 0.5,
+                    wins_this_season INTEGER DEFAULT 0,
+                    top10s_this_season INTEGER DEFAULT 0,
+                    events_played INTEGER DEFAULT 0,
+                    total_earnings REAL DEFAULT 0,
+                    last_updated TEXT
+                )
+            """)
+
+            # Predictions - Store predictions for accuracy tracking
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tournament_name TEXT NOT NULL,
+                    golfer_name TEXT NOT NULL,
+                    prediction_type TEXT NOT NULL,
+                    predicted_value REAL NOT NULL,
+                    actual_value REAL,
+                    error REAL,
+                    squared_error REAL,
+                    prediction_made_at TEXT,
+                    outcome_recorded_at TEXT,
+                    UNIQUE(tournament_name, golfer_name, prediction_type)
+                )
+            """)
+
+            # Model accuracy - Aggregate accuracy metrics over time
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_accuracy (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_name TEXT NOT NULL,
+                    metric_value REAL NOT NULL,
+                    tournament_name TEXT,
+                    sample_size INTEGER,
+                    time_period TEXT,
+                    recorded_at TEXT
+                )
+            """)
+
+            # Opponent patterns - Learn opponent picking behavior
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS opponent_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    opponent_name TEXT NOT NULL UNIQUE,
+                    prefers_favorites REAL DEFAULT 0.5,
+                    prefers_value REAL DEFAULT 0.5,
+                    prefers_course_fit REAL DEFAULT 0.5,
+                    risk_tolerance REAL DEFAULT 0.5,
+                    avg_golfer_ranking REAL,
+                    avg_win_prob_selected REAL,
+                    total_picks_tracked INTEGER DEFAULT 0,
+                    last_updated TEXT
                 )
             """)
 
@@ -728,3 +910,631 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM picks")
             return cursor.fetchone()[0]
+
+    # =========================================================================
+    # Course History operations (Phase 2.1)
+    # =========================================================================
+
+    def save_course_history_entry(
+        self,
+        golfer_name: str,
+        course_name: str,
+        tournament_name: str,
+        year: int,
+        finish_position: int,
+        earnings: int = 0,
+        sg_total: float = 0.0,
+        made_cut: bool = True
+    ):
+        """Save a single course history entry."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO course_history
+                (golfer_name, course_name, tournament_name, year, finish_position, earnings, sg_total, made_cut, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                golfer_name, course_name, tournament_name, year,
+                finish_position, earnings, sg_total,
+                1 if made_cut else 0, datetime.now().isoformat()
+            ))
+
+    def get_course_history(self, golfer_name: str, course_name: str) -> Optional[CourseHistory]:
+        """Get aggregated course history for a golfer at a course."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM course_history
+                WHERE golfer_name = ? AND course_name = ?
+                ORDER BY year DESC
+            """, (golfer_name, course_name))
+            rows = cursor.fetchall()
+
+            if not rows:
+                return None
+
+            # Aggregate the data
+            years_played = len(rows)
+            finishes = [r["finish_position"] for r in rows if r["finish_position"]]
+            earnings = sum(r["earnings"] for r in rows)
+            sg_totals = [r["sg_total"] for r in rows if r["sg_total"] != 0]
+            cuts_made = sum(1 for r in rows if r["made_cut"])
+            missed_cuts = sum(1 for r in rows if not r["made_cut"])
+
+            # Calculate stats
+            avg_finish = sum(finishes) / len(finishes) if finishes else 0
+            best_finish = min(finishes) if finishes else 999
+            wins = sum(1 for f in finishes if f == 1)
+            top_5s = sum(1 for f in finishes if f <= 5)
+            top_10s = sum(1 for f in finishes if f <= 10)
+            sg_avg = sum(sg_totals) / len(sg_totals) if sg_totals else 0
+
+            # Recent performance (last 2 years)
+            recent_rows = rows[:2]
+            recent_finishes = [r["finish_position"] for r in recent_rows if r["finish_position"]]
+            recent_sg_totals = [r["sg_total"] for r in recent_rows if r["sg_total"] != 0]
+            recent_avg_finish = sum(recent_finishes) / len(recent_finishes) if recent_finishes else 0
+            recent_sg = sum(recent_sg_totals) / len(recent_sg_totals) if recent_sg_totals else 0
+
+            return CourseHistory(
+                golfer_name=golfer_name,
+                course_name=course_name,
+                tournament_name=rows[0]["tournament_name"],
+                years_played=years_played,
+                avg_finish=avg_finish,
+                best_finish=best_finish,
+                wins=wins,
+                top_5s=top_5s,
+                top_10s=top_10s,
+                cuts_made=cuts_made,
+                missed_cuts=missed_cuts,
+                total_earnings=earnings,
+                sg_total_at_course=sg_avg,
+                recent_avg_finish=recent_avg_finish,
+                recent_sg=recent_sg,
+            )
+
+    def get_all_course_history_for_golfer(self, golfer_name: str) -> Dict[str, CourseHistory]:
+        """Get course history for all courses a golfer has played."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT course_name FROM course_history
+                WHERE golfer_name = ?
+            """, (golfer_name,))
+            courses = [row["course_name"] for row in cursor.fetchall()]
+
+        result = {}
+        for course in courses:
+            history = self.get_course_history(golfer_name, course)
+            if history:
+                result[course] = history
+        return result
+
+    # =========================================================================
+    # Golfer Availability operations (Phase 2.2)
+    # =========================================================================
+
+    def save_golfer_availability(
+        self,
+        golfer_name: str,
+        tournament_name: str,
+        status: str,
+        probability: float = 0.0
+    ):
+        """Save golfer availability status for a tournament."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO golfer_availability
+                (golfer_name, tournament_name, status, probability, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (golfer_name, tournament_name, status, probability, datetime.now().isoformat()))
+
+    def get_golfer_availability(self, golfer_name: str, tournament_name: str) -> Optional[GolferAvailability]:
+        """Get golfer availability status for a tournament."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT status FROM golfer_availability
+                WHERE golfer_name = ? AND tournament_name = ?
+            """, (golfer_name, tournament_name))
+            row = cursor.fetchone()
+            if row:
+                try:
+                    return GolferAvailability(row["status"])
+                except ValueError:
+                    return GolferAvailability.UNKNOWN
+        return None
+
+    def get_all_availability_for_tournament(self, tournament_name: str) -> Dict[str, GolferAvailability]:
+        """Get availability status for all golfers in a tournament."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT golfer_name, status FROM golfer_availability
+                WHERE tournament_name = ?
+            """, (tournament_name,))
+            result = {}
+            for row in cursor.fetchall():
+                try:
+                    result[row["golfer_name"]] = GolferAvailability(row["status"])
+                except ValueError:
+                    result[row["golfer_name"]] = GolferAvailability.UNKNOWN
+            return result
+
+    # =========================================================================
+    # Season Plan operations (Phase 2.3)
+    # =========================================================================
+
+    def save_season_plan_entry(
+        self,
+        tournament_name: str,
+        tournament_date: date,
+        golfer_name: Optional[str] = None,
+        is_tentative: bool = True,
+        projected_ev: float = 0.0,
+        notes: str = "",
+        entry_id: int = 1
+    ):
+        """Save or update a season plan entry."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute("""
+                INSERT OR REPLACE INTO season_plan
+                (entry_id, tournament_name, tournament_date, golfer_name, is_tentative, projected_ev, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                entry_id, tournament_name, tournament_date.isoformat(),
+                golfer_name, 1 if is_tentative else 0, projected_ev, notes, now, now
+            ))
+
+    def get_season_plan(self, entry_id: int = 1) -> List[SeasonPlanEntry]:
+        """Get the full season plan for an entry."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM season_plan
+                WHERE entry_id = ?
+                ORDER BY tournament_date
+            """, (entry_id,))
+            return [
+                SeasonPlanEntry(
+                    tournament_name=row["tournament_name"],
+                    tournament_date=date.fromisoformat(row["tournament_date"]),
+                    golfer_name=row["golfer_name"],
+                    is_tentative=bool(row["is_tentative"]),
+                    projected_ev=row["projected_ev"],
+                    notes=row["notes"] or "",
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def delete_season_plan_entry(self, tournament_name: str, entry_id: int = 1):
+        """Delete a season plan entry."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM season_plan
+                WHERE entry_id = ? AND tournament_name = ?
+            """, (entry_id, tournament_name))
+
+    def get_season_plan_conflicts(self, entry_id: int = 1) -> List[str]:
+        """Find golfers assigned to multiple tournaments in the plan."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT golfer_name, COUNT(*) as count
+                FROM season_plan
+                WHERE entry_id = ? AND golfer_name IS NOT NULL
+                GROUP BY golfer_name
+                HAVING count > 1
+            """, (entry_id,))
+            return [row["golfer_name"] for row in cursor.fetchall()]
+
+    def get_projected_season_earnings(self, entry_id: int = 1) -> float:
+        """Calculate total projected earnings from season plan."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT SUM(projected_ev) as total
+                FROM season_plan
+                WHERE entry_id = ? AND golfer_name IS NOT NULL
+            """, (entry_id,))
+            result = cursor.fetchone()
+            return result["total"] or 0.0
+
+    # =========================================================================
+    # Multi-Entry operations (Phase 3.2)
+    # =========================================================================
+
+    def create_entry(self, entry_name: str) -> int:
+        """Create a new entry for multi-entry tracking."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO entries (entry_name, created_at)
+                VALUES (?, ?)
+            """, (entry_name, datetime.now().isoformat()))
+            return cursor.lastrowid
+
+    def get_all_entries(self) -> List[Entry]:
+        """Get all entries."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM entries ORDER BY id")
+            entries = []
+            for row in cursor.fetchall():
+                entry = Entry(
+                    entry_id=row["id"],
+                    entry_name=row["entry_name"],
+                )
+                # Get picks for this entry
+                cursor.execute("""
+                    SELECT golfer_name, tournament_name, tournament_date, earnings, position, made_cut
+                    FROM entry_picks WHERE entry_id = ?
+                    ORDER BY tournament_date
+                """, (row["id"],))
+                for pick_row in cursor.fetchall():
+                    pick = Pick(
+                        golfer_name=pick_row["golfer_name"],
+                        tournament_name=pick_row["tournament_name"],
+                        tournament_date=date.fromisoformat(pick_row["tournament_date"]),
+                        earnings=pick_row["earnings"],
+                        position=pick_row["position"],
+                        made_cut=bool(pick_row["made_cut"]),
+                    )
+                    entry.picks.append(pick)
+                    entry.total_earnings += pick.earnings
+                    entry.used_golfers.append(pick.golfer_name)
+                entries.append(entry)
+            return entries
+
+    def save_entry_pick(self, entry_id: int, pick: Pick):
+        """Save a pick for a specific entry."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO entry_picks
+                (entry_id, golfer_name, tournament_name, tournament_date, earnings, position, made_cut, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                entry_id, pick.golfer_name, pick.tournament_name,
+                pick.tournament_date.isoformat(), pick.earnings,
+                pick.position, 1 if pick.made_cut else 0, datetime.now().isoformat()
+            ))
+
+    def get_entry_used_golfers(self, entry_id: int) -> List[str]:
+        """Get list of golfers used by a specific entry."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT golfer_name FROM entry_picks
+                WHERE entry_id = ?
+            """, (entry_id,))
+            return [row["golfer_name"] for row in cursor.fetchall()]
+
+    # =========================================================================
+    # Learning Feature Operations
+    # =========================================================================
+
+    def save_pick_outcome(
+        self,
+        golfer_name: str,
+        tournament_name: str,
+        tournament_date: date,
+        purse: int = 0,
+        predicted_win_prob: float = 0,
+        predicted_top10_prob: float = 0,
+        predicted_ev: float = 0,
+        predicted_course_fit: float = 0,
+        strategic_score: float = 0,
+        was_save_warning: bool = False,
+        was_my_pick: bool = False
+    ):
+        """Record a prediction for later outcome comparison."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO pick_outcomes
+                (golfer_name, tournament_name, tournament_date, purse,
+                 predicted_win_prob, predicted_top10_prob, predicted_ev,
+                 predicted_course_fit, strategic_score, was_save_warning,
+                 was_my_pick, outcome_recorded, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """, (
+                golfer_name, tournament_name, tournament_date.isoformat(),
+                purse, predicted_win_prob, predicted_top10_prob, predicted_ev,
+                predicted_course_fit, strategic_score,
+                1 if was_save_warning else 0, 1 if was_my_pick else 0,
+                datetime.now().isoformat()
+            ))
+
+    def record_pick_outcome_result(
+        self,
+        golfer_name: str,
+        tournament_name: str,
+        actual_position: int,
+        actual_earnings: int,
+        made_cut: bool
+    ):
+        """Record the actual outcome for a previously saved prediction."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE pick_outcomes
+                SET actual_position = ?, actual_earnings = ?, made_cut = ?,
+                    outcome_recorded = 1, outcome_recorded_at = ?
+                WHERE golfer_name = ? AND tournament_name = ?
+                  AND outcome_recorded = 0
+            """, (
+                actual_position, actual_earnings, 1 if made_cut else 0,
+                datetime.now().isoformat(), golfer_name, tournament_name
+            ))
+            return cursor.rowcount > 0
+
+    def get_pick_outcomes(self, days: int = 365, recorded_only: bool = False) -> List[Dict]:
+        """Get pick outcomes for analysis."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - __import__('datetime').timedelta(days=days)).isoformat()
+            sql = """
+                SELECT * FROM pick_outcomes
+                WHERE created_at >= ?
+            """
+            if recorded_only:
+                sql += " AND outcome_recorded = 1"
+            sql += " ORDER BY created_at DESC"
+            cursor.execute(sql, (cutoff,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_pending_outcomes(self) -> List[Dict]:
+        """Get predictions that need outcome recording."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM pick_outcomes
+                WHERE outcome_recorded = 0
+                ORDER BY tournament_date ASC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_learned_course_fit(
+        self,
+        tournament_name: str,
+        skill_name: str,
+        static_weight: float,
+        learned_weight: float,
+        confidence: float,
+        sample_size: int
+    ):
+        """Save or update a learned course fit weight."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO learned_course_fits
+                (tournament_name, skill_name, static_weight, learned_weight,
+                 confidence, sample_size, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                tournament_name, skill_name, static_weight, learned_weight,
+                confidence, sample_size, datetime.now().isoformat()
+            ))
+
+    def get_learned_course_fits(self, tournament_name: str = None) -> List[Dict]:
+        """Get learned course fit weights."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            if tournament_name:
+                cursor.execute("""
+                    SELECT * FROM learned_course_fits
+                    WHERE tournament_name = ?
+                    ORDER BY skill_name
+                """, (tournament_name,))
+            else:
+                cursor.execute("""
+                    SELECT * FROM learned_course_fits
+                    ORDER BY tournament_name, skill_name
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_learned_elite_tier(
+        self,
+        golfer_name: str,
+        static_tier: int,
+        learned_tier: int,
+        performance_score: float,
+        tier_confidence: float,
+        wins_this_season: int = 0,
+        top10s_this_season: int = 0,
+        events_played: int = 0,
+        total_earnings: float = 0
+    ):
+        """Save or update a learned elite tier adjustment."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO learned_elite_tiers
+                (golfer_name, static_tier, learned_tier, performance_score,
+                 tier_confidence, wins_this_season, top10s_this_season,
+                 events_played, total_earnings, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                golfer_name, static_tier, learned_tier, performance_score,
+                tier_confidence, wins_this_season, top10s_this_season,
+                events_played, total_earnings, datetime.now().isoformat()
+            ))
+
+    def get_learned_elite_tiers(self) -> List[Dict]:
+        """Get all learned elite tier adjustments."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM learned_elite_tiers
+                ORDER BY learned_tier, performance_score DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_elite_tier_changes(self) -> List[Dict]:
+        """Get golfers whose learned tier differs from static tier."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM learned_elite_tiers
+                WHERE learned_tier != static_tier
+                ORDER BY ABS(learned_tier - static_tier) DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_prediction(
+        self,
+        tournament_name: str,
+        golfer_name: str,
+        prediction_type: str,
+        predicted_value: float
+    ):
+        """Save a prediction for accuracy tracking."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO predictions
+                (tournament_name, golfer_name, prediction_type, predicted_value, prediction_made_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                tournament_name, golfer_name, prediction_type,
+                predicted_value, datetime.now().isoformat()
+            ))
+
+    def record_prediction_outcome(
+        self,
+        tournament_name: str,
+        golfer_name: str,
+        prediction_type: str,
+        actual_value: float
+    ):
+        """Record actual outcome for a prediction."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT predicted_value FROM predictions
+                WHERE tournament_name = ? AND golfer_name = ? AND prediction_type = ?
+            """, (tournament_name, golfer_name, prediction_type))
+            row = cursor.fetchone()
+            if row:
+                predicted = row["predicted_value"]
+                error = predicted - actual_value
+                squared_error = error * error
+                cursor.execute("""
+                    UPDATE predictions
+                    SET actual_value = ?, error = ?, squared_error = ?,
+                        outcome_recorded_at = ?
+                    WHERE tournament_name = ? AND golfer_name = ? AND prediction_type = ?
+                """, (
+                    actual_value, error, squared_error, datetime.now().isoformat(),
+                    tournament_name, golfer_name, prediction_type
+                ))
+
+    def get_predictions(self, prediction_type: str = None, days: int = 365) -> List[Dict]:
+        """Get predictions for analysis."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - __import__('datetime').timedelta(days=days)).isoformat()
+            if prediction_type:
+                cursor.execute("""
+                    SELECT * FROM predictions
+                    WHERE prediction_type = ? AND prediction_made_at >= ?
+                    ORDER BY prediction_made_at DESC
+                """, (prediction_type, cutoff))
+            else:
+                cursor.execute("""
+                    SELECT * FROM predictions
+                    WHERE prediction_made_at >= ?
+                    ORDER BY prediction_made_at DESC
+                """, (cutoff,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_model_accuracy(
+        self,
+        metric_name: str,
+        metric_value: float,
+        tournament_name: str = None,
+        sample_size: int = None,
+        time_period: str = "weekly"
+    ):
+        """Save a model accuracy metric."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO model_accuracy
+                (metric_name, metric_value, tournament_name, sample_size, time_period, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                metric_name, metric_value, tournament_name, sample_size,
+                time_period, datetime.now().isoformat()
+            ))
+
+    def get_model_accuracy_history(self, metric_name: str = None, days: int = 180) -> List[Dict]:
+        """Get model accuracy history for trend analysis."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - __import__('datetime').timedelta(days=days)).isoformat()
+            if metric_name:
+                cursor.execute("""
+                    SELECT * FROM model_accuracy
+                    WHERE metric_name = ? AND recorded_at >= ?
+                    ORDER BY recorded_at ASC
+                """, (metric_name, cutoff))
+            else:
+                cursor.execute("""
+                    SELECT * FROM model_accuracy
+                    WHERE recorded_at >= ?
+                    ORDER BY recorded_at ASC
+                """, (cutoff,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def save_opponent_pattern(
+        self,
+        opponent_name: str,
+        prefers_favorites: float = 0.5,
+        prefers_value: float = 0.5,
+        prefers_course_fit: float = 0.5,
+        risk_tolerance: float = 0.5,
+        avg_golfer_ranking: float = None,
+        avg_win_prob_selected: float = None,
+        total_picks_tracked: int = 0
+    ):
+        """Save or update an opponent's picking pattern."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO opponent_patterns
+                (opponent_name, prefers_favorites, prefers_value, prefers_course_fit,
+                 risk_tolerance, avg_golfer_ranking, avg_win_prob_selected,
+                 total_picks_tracked, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                opponent_name, prefers_favorites, prefers_value, prefers_course_fit,
+                risk_tolerance, avg_golfer_ranking, avg_win_prob_selected,
+                total_picks_tracked, datetime.now().isoformat()
+            ))
+
+    def get_opponent_patterns(self) -> List[Dict]:
+        """Get all learned opponent patterns."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM opponent_patterns
+                ORDER BY total_picks_tracked DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_opponent_pattern(self, opponent_name: str) -> Optional[Dict]:
+        """Get a specific opponent's pattern."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM opponent_patterns WHERE opponent_name = ?
+            """, (opponent_name,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
