@@ -651,7 +651,7 @@ def show_betting_odds():
 
     api = st.session_state.api
 
-    tab1, tab2, tab3 = st.tabs(["Betting Odds", "Approach Skills", "Course Fit"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Betting Odds", "Approach Skills", "Course Fit", "Premium Odds"])
 
     with tab1:
         st.subheader("Betting Odds Comparison")
@@ -939,6 +939,133 @@ def show_betting_odds():
                     st.warning("No decomposition data returned.")
             else:
                 st.warning("Could not fetch player decompositions. Check API connection.")
+
+    with tab4:
+        st.subheader("Premium Odds Features")
+        st.markdown("Advanced odds data from The Odds API Premium tier.")
+
+        from api import get_odds_api
+        odds_api = get_odds_api()
+
+        if not odds_api.is_configured():
+            st.warning("ODDS_API_KEY not configured. Add it to your .env file.")
+        else:
+            # API Usage
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                if st.button("Check API Usage"):
+                    usage = odds_api.get_api_usage()
+                    if "error" not in usage:
+                        st.metric("Requests Remaining", usage.get("requests_remaining", "N/A"))
+                        st.metric("Requests Used", usage.get("requests_used", "N/A"))
+                    else:
+                        st.error(usage["error"])
+
+            st.divider()
+
+            # Prop Bets Section
+            st.subheader("Prop Bets (Top 5/10/20 Finish)")
+
+            prop_market = st.selectbox(
+                "Select Prop Market",
+                ["player_top_5", "player_top_10", "player_top_20"],
+                format_func=lambda x: x.replace("player_", "").replace("_", " ").title()
+            )
+
+            if st.button("Fetch Prop Odds", key="fetch_props"):
+                with st.spinner(f"Fetching {prop_market} odds..."):
+                    prop_odds = odds_api.get_prop_odds(market=prop_market)
+
+                if prop_odds:
+                    data = []
+                    for golfer, odds_data in prop_odds.items():
+                        data.append({
+                            "Golfer": golfer,
+                            "Consensus %": odds_data.get("consensus_prob", 0) * 100,
+                            "# Books": odds_data.get("num_books", 0),
+                        })
+
+                    df = pd.DataFrame(data)
+                    df = df.sort_values("Consensus %", ascending=False)
+
+                    st.dataframe(
+                        df.style.format({"Consensus %": "{:.1f}%"}),
+                        use_container_width=True,
+                        height=400
+                    )
+
+                    # Compare to model
+                    st.subheader("Value Comparison")
+                    predictions = api.get_pre_tournament_predictions()
+
+                    # Get appropriate model probabilities based on prop type
+                    if "top_5" in prop_market:
+                        model_probs = {p.golfer_name: p.top_5_prob for p in predictions if p.top_5_prob}
+                    elif "top_10" in prop_market:
+                        model_probs = {p.golfer_name: p.top_10_prob for p in predictions if p.top_10_prob}
+                    elif "top_20" in prop_market:
+                        model_probs = {p.golfer_name: p.top_20_prob for p in predictions if p.top_20_prob}
+                    else:
+                        model_probs = {}
+
+                    if model_probs:
+                        value_data = []
+                        for golfer, odds_data in prop_odds.items():
+                            if golfer in model_probs:
+                                model_p = model_probs[golfer]
+                                market_p = odds_data.get("consensus_prob", 0)
+                                edge = model_p - market_p
+                                if market_p > 0:
+                                    value_data.append({
+                                        "Golfer": golfer,
+                                        "Model %": model_p * 100,
+                                        "Market %": market_p * 100,
+                                        "Edge %": edge * 100,
+                                    })
+
+                        if value_data:
+                            vdf = pd.DataFrame(value_data)
+                            vdf = vdf.sort_values("Edge %", ascending=False)
+
+                            st.markdown("**Top Value Plays:**")
+                            for _, row in vdf.head(5).iterrows():
+                                if row["Edge %"] > 2:
+                                    st.success(f"**{row['Golfer']}**: Model {row['Model %']:.1f}% vs Market {row['Market %']:.1f}% = **+{row['Edge %']:.1f}% edge**")
+                                elif row["Edge %"] > 0:
+                                    st.info(f"**{row['Golfer']}**: +{row['Edge %']:.1f}% edge")
+                else:
+                    st.info("No prop odds available for current tournaments.")
+
+            st.divider()
+
+            # Head to Head
+            st.subheader("Head-to-Head Matchups")
+            if st.button("Fetch H2H Odds", key="fetch_h2h"):
+                with st.spinner("Fetching head-to-head matchup odds..."):
+                    h2h_data = odds_api.get_head_to_head_odds()
+
+                if h2h_data:
+                    st.json(h2h_data[:3] if isinstance(h2h_data, list) else h2h_data)
+                else:
+                    st.info("No head-to-head markets available for current tournaments.")
+
+            st.divider()
+
+            # Event Scores/Results
+            st.subheader("Recent Results")
+            if st.button("Fetch Recent Scores", key="fetch_scores"):
+                with st.spinner("Fetching recent tournament results..."):
+                    scores = odds_api.get_event_scores(days_from=7)
+
+                if scores:
+                    for event in scores[:5]:
+                        with st.expander(event.get("sport_title", "Golf Event")):
+                            st.write(f"**Status:** {event.get('completed', 'In Progress')}")
+                            if event.get("scores"):
+                                for score in event["scores"][:10]:
+                                    st.write(f"- {score.get('name', 'Unknown')}: {score.get('score', 'N/A')}")
+                else:
+                    st.info("No recent scores available.")
 
 
 def show_schedule():
