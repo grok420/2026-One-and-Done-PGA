@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 class Scraper:
     """Web scraper for buzzfantasygolf.com."""
 
+    # League-specific URLs (Bushwood league)
+    LEAGUE_ID = "25378"
+    BASE_URL = "https://www.buzzfantasygolf.com"
+
     def __init__(self, headless: bool = True):
         """Initialize scraper."""
         self.config = get_config()
@@ -43,6 +47,7 @@ class Scraper:
         self._driver: Optional[webdriver.Chrome] = None
         self._request_count = 0
         self._logged_in = False
+        self._team_id: Optional[str] = None
 
     def _get_driver(self) -> webdriver.Chrome:
         """Get or create Chrome WebDriver."""
@@ -101,6 +106,8 @@ class Scraper:
 
             # Try multiple selectors for email field
             email_selectors = [
+                "#Email",
+                "input[name='Email']",
                 "input[name='email']",
                 "input[type='email']",
                 "#email",
@@ -122,6 +129,8 @@ class Scraper:
 
             # Find password field
             password_selectors = [
+                "#Password",
+                "input[name='Password']",
                 "input[name='password']",
                 "input[type='password']",
                 "#password",
@@ -192,25 +201,19 @@ class Scraper:
 
         driver = self._get_driver()
         try:
-            # Navigate to league/standings page
-            standings_urls = [
-                f"{self.config.site_base_url}/league/{self.config.league_name}/standings",
-                f"{self.config.site_base_url}/standings",
-                f"{self.config.site_base_url}/league/standings",
-            ]
+            # Navigate to league standings page
+            url = f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/standings"
+            driver.get(url)
+            self._wait_and_throttle()
 
-            html = None
-            for url in standings_urls:
-                try:
-                    driver.get(url)
-                    self._wait_and_throttle()
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "table"))
-                    )
-                    html = driver.page_source
-                    break
-                except TimeoutException:
-                    continue
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "table"))
+                )
+                html = driver.page_source
+            except TimeoutException:
+                logger.error("Could not find standings table")
+                return []
 
             if not html:
                 logger.error("Could not find standings page")
@@ -247,66 +250,42 @@ class Scraper:
         soup = BeautifulSoup(html, "html.parser")
         standings = []
 
-        # Try different table selectors
-        table = None
-        for selector in ["table.standings", ".standings-table", "#standings", "table"]:
-            table = soup.select_one(selector)
-            if table:
-                break
-
+        # Find the standings table
+        table = soup.find("table")
         if not table:
             logger.warning("No standings table found in HTML")
             return []
 
         rows = table.find_all("tr")[1:]  # Skip header row
-        for i, row in enumerate(rows):
-            cells = row.find_all(["td", "th"])
+        for row in rows:
+            cells = row.find_all("td")
             if len(cells) < 3:
                 continue
 
             try:
-                # Extract data - format varies by site
-                rank = i + 1
-                player_name = ""
-                username = ""
-                earnings = 0
-                cuts_made = 0
+                # Table format: Place | Team Name (with username) | Earnings
+                place_text = cells[0].get_text(strip=True)
+                # Handle "T2" format for ties
+                rank = int(place_text.replace("T", "").strip()) if place_text else 0
 
-                for j, cell in enumerate(cells):
-                    text = cell.get_text(strip=True)
-                    # First column usually rank or name
-                    if j == 0:
-                        if text.isdigit():
-                            rank = int(text)
-                        else:
-                            player_name = text
-                    elif j == 1:
-                        if not player_name:
-                            player_name = text
-                        else:
-                            username = text
-                    elif "$" in text or text.replace(",", "").replace(".", "").isdigit():
-                        # This is likely earnings
-                        earnings_str = text.replace("$", "").replace(",", "")
-                        try:
-                            earnings = int(float(earnings_str))
-                        except ValueError:
-                            pass
-                    elif text.isdigit() and int(text) < 50:
-                        # Likely cuts made or picks count
-                        cuts_made = int(text)
+                # Team name cell contains both team name and username
+                name_cell = cells[1].get_text(separator="\n", strip=True)
+                lines = [l.strip() for l in name_cell.split("\n") if l.strip()]
+                username = lines[0] if lines else ""
+                player_name = lines[1] if len(lines) > 1 else username
 
-                # Use player_name as username if not found
-                if not username:
-                    username = player_name.lower().replace(" ", "")
+                # Earnings
+                earnings_text = cells[2].get_text(strip=True)
+                earnings_str = earnings_text.replace("$", "").replace(",", "")
+                earnings = int(float(earnings_str)) if earnings_str else 0
 
                 standings.append(LeagueStanding(
                     rank=rank,
                     player_name=player_name,
                     username=username,
                     total_earnings=earnings,
-                    cuts_made=cuts_made,
-                    picks_made=0,  # May not be on standings page
+                    cuts_made=0,
+                    picks_made=0,
                     majors_earnings=0,
                 ))
             except Exception as e:
@@ -329,27 +308,21 @@ class Scraper:
 
         driver = self._get_driver()
         try:
-            # Navigate to pick/selection page
-            pick_urls = [
-                f"{self.config.site_base_url}/pick",
-                f"{self.config.site_base_url}/make-pick",
-                f"{self.config.site_base_url}/selection",
-            ]
+            # Navigate to current field page which shows available golfers
+            url = f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/field"
+            driver.get(url)
+            self._wait_and_throttle()
+            time.sleep(3)
 
-            html = None
-            for url in pick_urls:
-                try:
-                    driver.get(url)
-                    self._wait_and_throttle()
-                    time.sleep(2)  # Wait for JS to load
-                    html = driver.page_source
-                    break
-                except Exception:
-                    continue
+            # Wait for table to load
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "table"))
+                )
+            except TimeoutException:
+                pass
 
-            if not html:
-                return []
-
+            html = driver.page_source
             golfers = self._parse_available_golfers(html)
 
             # Cache and save to database
@@ -365,25 +338,34 @@ class Scraper:
             return []
 
     def _parse_available_golfers(self, html: str) -> List[str]:
-        """Parse available golfers from selection page."""
+        """Parse available golfers from field/selection page."""
         soup = BeautifulSoup(html, "html.parser")
         golfers = []
 
-        # Try select/dropdown first
-        select = soup.find("select", class_=lambda c: c and "golfer" in c.lower() if c else False)
-        if not select:
-            select = soup.find("select", id=lambda i: i and "golfer" in i.lower() if i else False)
-        if not select:
-            select = soup.find("select")
+        # Try table format first (field page has a table of golfers)
+        table = soup.find("table")
+        if table:
+            rows = table.find_all("tr")[1:]  # Skip header
+            for row in rows:
+                cells = row.find_all("td")
+                if cells:
+                    # First cell usually contains golfer name
+                    name = cells[0].get_text(strip=True)
+                    if name and name not in ["", "Golfer Name", "Select"]:
+                        golfers.append(name)
 
-        if select:
-            options = select.find_all("option")
-            for opt in options:
-                name = opt.get_text(strip=True)
-                if name and name != "Select a golfer" and name != "--":
-                    golfers.append(name)
-        else:
-            # Try list/div format
+        # Also try select/dropdown
+        if not golfers:
+            select = soup.find("select")
+            if select:
+                options = select.find_all("option")
+                for opt in options:
+                    name = opt.get_text(strip=True)
+                    if name and name not in ["Select a golfer", "--", ""]:
+                        golfers.append(name)
+
+        # Also try list/div format
+        if not golfers:
             golfer_divs = soup.find_all(class_=lambda c: c and "golfer" in c.lower() if c else False)
             for div in golfer_divs:
                 name = div.get_text(strip=True)
@@ -394,7 +376,7 @@ class Scraper:
         return golfers
 
     def get_opponent_picks(self, tournament_name: str = "") -> List[OpponentPick]:
-        """Scrape all opponent picks for a tournament."""
+        """Scrape all opponent picks from live scoring page."""
         cache_key = f"scraper:opponent_picks:{tournament_name}"
         cached = self.db.get_cache(cache_key)
         if cached:
@@ -405,29 +387,20 @@ class Scraper:
 
         driver = self._get_driver()
         try:
-            # Navigate to picks/history page
-            picks_urls = [
-                f"{self.config.site_base_url}/league/{self.config.league_name}/picks",
-                f"{self.config.site_base_url}/picks",
-                f"{self.config.site_base_url}/league/picks",
-            ]
+            # Use live scoring page which shows all teams and their picks
+            url = f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/livescoring"
+            driver.get(url)
+            self._wait_and_throttle()
 
-            html = None
-            for url in picks_urls:
-                try:
-                    driver.get(url)
-                    self._wait_and_throttle()
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "table"))
-                    )
-                    html = driver.page_source
-                    break
-                except TimeoutException:
-                    continue
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "table"))
+                )
+            except TimeoutException:
+                pass
 
-            if not html:
-                return []
-
+            time.sleep(2)
+            html = driver.page_source
             picks = self._parse_opponent_picks(html, tournament_name)
 
             # Cache and save
@@ -438,7 +411,7 @@ class Scraper:
                         "opponent_username": p.opponent_username,
                         "golfer_name": p.golfer_name,
                         "tournament_name": p.tournament_name,
-                        "tournament_date": p.tournament_date.isoformat(),
+                        "tournament_date": p.tournament_date.isoformat() if hasattr(p.tournament_date, 'isoformat') else str(p.tournament_date),
                     } for p in picks
                 ], expires)
 
@@ -452,120 +425,198 @@ class Scraper:
             return []
 
     def _parse_opponent_picks(self, html: str, filter_tournament: str = "") -> List[OpponentPick]:
-        """Parse opponent picks from HTML."""
+        """Parse opponent picks from live scoring HTML."""
         soup = BeautifulSoup(html, "html.parser")
         picks = []
 
-        tables = soup.find_all("table")
-        for table in tables:
-            rows = table.find_all("tr")[1:]  # Skip header
-            for row in rows:
-                cells = row.find_all(["td", "th"])
-                if len(cells) < 2:
-                    continue
+        # Live scoring table format: Pos | Chg | Team Name | Golfer | Earnings
+        table = soup.find("table")
+        if not table:
+            return picks
 
-                try:
-                    # Try to extract username, golfer, tournament
-                    username = ""
-                    golfer = ""
-                    tournament = ""
-                    tournament_date = date.today()
+        rows = table.find_all("tr")[1:]  # Skip header
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) < 4:
+                continue
 
-                    for cell in cells:
-                        text = cell.get_text(strip=True)
-                        # Identify field type by content/position
-                        if "@" in text or len(text) < 20:
-                            if not username:
-                                username = text
-                        elif any(name in text.lower() for name in ["open", "championship", "classic", "invitational"]):
-                            tournament = text
-                        else:
-                            # Assume it's a golfer name
-                            if not golfer:
-                                golfer = text
+            try:
+                # Format: Pos | Chg | Team Name (with username) | Golfer | Earnings
+                team_cell = cells[2].get_text(separator="\n", strip=True)
+                lines = [l.strip() for l in team_cell.split("\n") if l.strip()]
+                username = lines[0] if lines else ""
 
-                    if username and golfer:
-                        if filter_tournament and tournament and filter_tournament.lower() not in tournament.lower():
-                            continue
+                golfer = cells[3].get_text(strip=True)
 
-                        picks.append(OpponentPick(
-                            opponent_username=username,
-                            golfer_name=golfer,
-                            tournament_name=tournament or "Unknown",
-                            tournament_date=tournament_date,
-                        ))
-                except Exception as e:
-                    logger.warning(f"Failed to parse pick row: {e}")
-                    continue
+                if username and golfer:
+                    picks.append(OpponentPick(
+                        opponent_username=username,
+                        golfer_name=golfer,
+                        tournament_name=filter_tournament or "Current Tournament",
+                        tournament_date=date.today(),
+                    ))
+            except Exception as e:
+                logger.warning(f"Failed to parse pick row: {e}")
+                continue
 
         logger.info(f"Parsed {len(picks)} opponent picks")
         return picks
 
-    def get_my_picks(self) -> List[Pick]:
-        """Scrape user's own picks history."""
-        if not self._logged_in and not self.login():
-            return []
+    def _get_my_team_id(self) -> Optional[str]:
+        """Get the user's team ID from the league page."""
+        if self._team_id:
+            return self._team_id
 
         driver = self._get_driver()
         try:
-            driver.get(f"{self.config.site_base_url}/my-picks")
+            driver.get(f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/home")
+            self._wait_and_throttle()
+
+            # Find the "View Team" link which contains the team ID
+            links = driver.find_elements(By.CSS_SELECTOR, "a[href*='/teams/']")
+            for link in links:
+                href = link.get_attribute("href") or ""
+                if "/teams/" in href and self.LEAGUE_ID in href:
+                    # Extract team ID from URL like .../teams/176808
+                    parts = href.split("/teams/")
+                    if len(parts) > 1:
+                        self._team_id = parts[1].split("/")[0].split("?")[0]
+                        logger.info(f"Found team ID: {self._team_id}")
+                        return self._team_id
+        except Exception as e:
+            logger.warning(f"Could not find team ID: {e}")
+
+        return None
+
+    def get_my_picks(self) -> List[Pick]:
+        """Scrape user's own picks history from team page."""
+        if not self._logged_in and not self.login():
+            return []
+
+        team_id = self._get_my_team_id()
+        if not team_id:
+            logger.error("Could not find team ID")
+            return []
+
+        driver = self._get_driver()
+        picks = []
+
+        try:
+            # Get list of tournaments from league page
+            driver.get(f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/tournaments")
             self._wait_and_throttle()
             time.sleep(2)
 
-            html = driver.page_source
-            soup = BeautifulSoup(html, "html.parser")
-            picks = []
+            # Find tournament links
+            tournament_links = []
+            links = driver.find_elements(By.CSS_SELECTOR, f"a[href*='/leagues/{self.LEAGUE_ID}/tournaments/']")
+            for link in links:
+                href = link.get_attribute("href") or ""
+                text = link.text.strip()
+                if text and "/tournaments/" in href:
+                    # Extract tournament ID
+                    parts = href.split("/tournaments/")
+                    if len(parts) > 1:
+                        t_id = parts[1].split("/")[0].split("?")[0]
+                        if t_id.isdigit():
+                            tournament_links.append((t_id, text))
 
-            table = soup.find("table")
-            if not table:
-                return []
+            logger.info(f"Found {len(tournament_links)} tournaments")
 
-            rows = table.find_all("tr")[1:]
-            for row in rows:
-                cells = row.find_all(["td", "th"])
-                if len(cells) < 2:
-                    continue
+            # Go to team page and check each tournament
+            driver.get(f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/teams/{team_id}")
+            time.sleep(3)
 
-                try:
-                    golfer = ""
-                    tournament = ""
-                    earnings = 0
-                    position = None
-                    made_cut = False
+            # Wait for dynamic content to load
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "table"))
+                )
+            except TimeoutException:
+                pass
 
-                    for cell in cells:
-                        text = cell.get_text(strip=True)
-                        if "$" in text:
-                            earnings_str = text.replace("$", "").replace(",", "")
-                            try:
-                                earnings = int(float(earnings_str))
-                            except ValueError:
-                                pass
-                        elif text.isdigit():
-                            pos = int(text)
-                            if pos < 100:
-                                position = pos
-                                made_cut = pos <= 70
-                        elif any(x in text.lower() for x in ["open", "championship", "classic"]):
-                            tournament = text
-                        else:
-                            if not golfer:
-                                golfer = text
+            time.sleep(2)
 
-                    if golfer and tournament:
-                        pick = Pick(
-                            golfer_name=golfer,
-                            tournament_name=tournament,
-                            tournament_date=date.today(),  # Would need to parse
-                            earnings=earnings,
-                            position=position,
-                            made_cut=made_cut,
-                        )
-                        picks.append(pick)
-                        self.db.save_pick(pick)
-                except Exception as e:
-                    logger.warning(f"Failed to parse my pick: {e}")
-                    continue
+            # Find the picks table (second table usually has picks)
+            tables = driver.find_elements(By.TAG_NAME, "table")
+            for table in tables:
+                rows = table.find_elements(By.TAG_NAME, "tr")
+                for row in rows[1:]:  # Skip header
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) >= 2:
+                        try:
+                            # Format: Golfer Name | Place | R1 | R2 | R3 | R4 | Total | To Par | Earnings
+                            golfer_cell = cells[0].text.strip()
+                            # Extract golfer name (before "Ownership:")
+                            golfer_name = golfer_cell.split("\n")[0].strip()
+                            if not golfer_name or golfer_name == "Total:":
+                                continue
+
+                            position = None
+                            earnings = 0
+
+                            if len(cells) > 1:
+                                pos_text = cells[1].text.strip()
+                                if pos_text.isdigit():
+                                    position = int(pos_text)
+
+                            if len(cells) > 8:
+                                earn_text = cells[8].text.strip().replace("$", "").replace(",", "")
+                                try:
+                                    earnings = int(float(earn_text))
+                                except:
+                                    pass
+
+                            # We need to determine which tournament this is for
+                            # For now, use a placeholder - will be updated from tournament selector
+                            pick = Pick(
+                                golfer_name=golfer_name,
+                                tournament_name="Current Tournament",
+                                tournament_date=date.today(),
+                                earnings=earnings,
+                                position=position,
+                                made_cut=position is not None and position <= 65,
+                            )
+                            picks.append(pick)
+                            logger.info(f"Found pick: {golfer_name} (pos: {position}, earnings: ${earnings})")
+
+                        except Exception as e:
+                            logger.warning(f"Failed to parse pick row: {e}")
+                            continue
+
+            # Also get picks from standings/history if available
+            # by cross-referencing with livescoring page
+            driver.get(f"{self.BASE_URL}/leagues/{self.LEAGUE_ID}/livescoring")
+            time.sleep(2)
+
+            table = driver.find_element(By.TAG_NAME, "table") if driver.find_elements(By.TAG_NAME, "table") else None
+            if table:
+                rows = table.find_elements(By.TAG_NAME, "tr")[1:]
+                for row in rows:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) >= 4:
+                        team_name = cells[2].text.strip().lower()
+                        if "gitberge" in team_name or "chip and a putt" in team_name:
+                            golfer = cells[3].text.strip()
+                            earnings_text = cells[4].text.strip() if len(cells) > 4 else "$0"
+                            earnings = int(float(earnings_text.replace("$", "").replace(",", ""))) if "$" in earnings_text else 0
+
+                            # Check if we already have this pick
+                            existing = [p for p in picks if p.golfer_name == golfer]
+                            if not existing:
+                                pick = Pick(
+                                    golfer_name=golfer,
+                                    tournament_name="Current Tournament",
+                                    tournament_date=date.today(),
+                                    earnings=earnings,
+                                    position=None,
+                                    made_cut=True,
+                                )
+                                picks.append(pick)
+
+            # Save picks to database
+            for pick in picks:
+                self.db.save_pick(pick)
 
             return picks
 

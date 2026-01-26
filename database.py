@@ -578,6 +578,10 @@ class Database:
         """Save an opponent's pick."""
         with self._connection() as conn:
             cursor = conn.cursor()
+            # Handle both date objects and string dates
+            t_date = pick.tournament_date
+            if hasattr(t_date, 'isoformat'):
+                t_date = t_date.isoformat()
             cursor.execute("""
                 INSERT OR REPLACE INTO opponent_picks
                 (opponent_username, golfer_name, tournament_name, tournament_date, created_at)
@@ -586,7 +590,7 @@ class Database:
                 pick.opponent_username,
                 pick.golfer_name,
                 pick.tournament_name,
-                pick.tournament_date.isoformat(),
+                t_date,
                 datetime.now().isoformat(),
             ))
             return cursor.lastrowid
