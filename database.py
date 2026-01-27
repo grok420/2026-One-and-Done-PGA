@@ -894,9 +894,20 @@ class Database:
     # =========================================================================
 
     def get_total_earnings(self) -> int:
-        """Get user's total earnings this season."""
+        """Get user's total earnings this season from standings."""
         with self._connection() as conn:
             cursor = conn.cursor()
+            # Get from latest standings - look for user's team
+            cursor.execute("""
+                SELECT total_earnings FROM standings
+                WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM standings)
+                AND (username = 'Just a chip and a putt' OR player_name = 'Eric Gitberg')
+                LIMIT 1
+            """)
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            # Fallback to picks table sum
             cursor.execute("SELECT SUM(earnings) FROM picks")
             result = cursor.fetchone()[0]
             return result or 0
