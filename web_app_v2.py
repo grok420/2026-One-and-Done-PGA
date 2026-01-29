@@ -113,6 +113,20 @@ def init_session_state():
     if 'api' not in st.session_state:
         st.session_state.api = DataGolfAPI()
 
+    # Auto-sync on first load if database is empty
+    if 'data_synced' not in st.session_state:
+        db = st.session_state.db
+        api = st.session_state.api
+        if db.get_golfer_count() == 0 or db.get_valid_owgr_count() == 0:
+            with st.spinner("First load - syncing golfer data from Data Golf API..."):
+                try:
+                    api.sync_golfers_to_db()
+                    st.session_state.data_synced = True
+                except Exception as e:
+                    st.warning(f"Auto-sync failed: {e}. Go to Settings to sync manually.")
+        else:
+            st.session_state.data_synced = True
+
 
 def create_waterfall_chart(rec):
     """Create factor contribution waterfall chart."""
