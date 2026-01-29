@@ -903,6 +903,414 @@ class DataGolfAPI:
         logger.info(f"Synced {count} availability records for {tournament_name}")
         return count
 
+    # =========================================================================
+    # NEW ENDPOINTS - Tour Schedule & Archive
+    # =========================================================================
+
+    def get_tour_schedule(
+        self,
+        tour: str = "pga",
+        season: int = 2026,
+        upcoming_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Get tour schedule with event names, courses, locations, winners.
+
+        Args:
+            tour: pga, euro, kft, alt
+            season: 2024-2026
+            upcoming_only: Only return upcoming events
+        """
+        data = self._request(
+            "/get-schedule",
+            params={
+                "tour": tour,
+                "season": str(season),
+                "upcoming_only": "yes" if upcoming_only else "no",
+                "file_format": "json"
+            },
+            cache_hours=24
+        )
+
+        if not data:
+            return []
+
+        return data.get("schedule", [])
+
+    def get_pre_tournament_archive(
+        self,
+        event_id: str,
+        year: int = 2025
+    ) -> Dict[str, Any]:
+        """
+        Get historical pre-tournament predictions for a past event.
+
+        Args:
+            event_id: Event ID from schedule
+            year: 2020-2025
+        """
+        data = self._request(
+            "/preds/pre-tournament-archive",
+            params={
+                "event_id": event_id,
+                "year": str(year),
+                "odds_format": "percent",
+                "file_format": "json"
+            },
+            cache_hours=168  # Cache for a week (historical data)
+        )
+
+        return data or {}
+
+    # =========================================================================
+    # NEW ENDPOINTS - Live Tournament Data
+    # =========================================================================
+
+    def get_live_in_play(self, tour: str = "pga") -> Dict[str, Any]:
+        """
+        Get live finish probabilities during tournaments (updates every 5 min).
+
+        Returns current standings with live win/top-10/cut probabilities.
+        """
+        data = self._request(
+            "/preds/in-play",
+            params={
+                "tour": tour,
+                "dead_heat": "no",
+                "odds_format": "percent",
+                "file_format": "json"
+            },
+            cache_hours=0  # Don't cache live data
+        )
+
+        return data or {}
+
+    def get_live_hole_stats(self, tour: str = "pga") -> Dict[str, Any]:
+        """
+        Get live hole scoring averages and distributions by tee time wave.
+
+        Returns birdie/par/bogey rates per hole, useful for weather impact analysis.
+        """
+        data = self._request(
+            "/preds/live-hole-stats",
+            params={
+                "tour": tour,
+                "file_format": "json"
+            },
+            cache_hours=0  # Don't cache live data
+        )
+
+        return data or {}
+
+    # =========================================================================
+    # NEW ENDPOINTS - Betting Tools (Extended)
+    # =========================================================================
+
+    def get_matchups_all_pairings(self, tour: str = "pga") -> List[Dict[str, Any]]:
+        """
+        Get Data Golf matchup/3-ball odds for every possible pairing in next round.
+
+        Useful for finding betting value across all matchup combinations.
+        """
+        data = self._request(
+            "/betting-tools/matchups-all-pairings",
+            params={
+                "tour": tour,
+                "odds_format": "percent",
+                "file_format": "json"
+            },
+            cache_hours=1
+        )
+
+        if not data:
+            return []
+
+        return data.get("matchups", [])
+
+    # =========================================================================
+    # NEW ENDPOINTS - Historical Raw Data
+    # =========================================================================
+
+    def get_historical_event_list(self, tour: str = "pga") -> List[Dict[str, Any]]:
+        """
+        Get list of historical events with IDs for use with rounds endpoint.
+
+        Args:
+            tour: pga, euro, kft, liv, and 20+ other tour codes
+        """
+        data = self._request(
+            "/historical-raw-data/event-list",
+            params={
+                "tour": tour,
+                "file_format": "json"
+            },
+            cache_hours=168  # Cache for a week
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("events", [])
+
+    def get_historical_rounds(
+        self,
+        tour: str = "pga",
+        event_id: str = "all",
+        year: int = 2024
+    ) -> List[Dict[str, Any]]:
+        """
+        Get round-level scoring, stats, strokes-gained for historical events.
+
+        Args:
+            tour: Tour code (pga, euro, liv, etc.)
+            event_id: Event ID or "all" for all events
+            year: 1983-2026 depending on tour
+
+        Returns round-by-round data including:
+        - Score, strokes gained by category
+        - Traditional stats (fairways, greens, putts)
+        - Tee times
+        """
+        data = self._request(
+            "/historical-raw-data/rounds",
+            params={
+                "tour": tour,
+                "event_id": event_id,
+                "year": str(year),
+                "file_format": "json"
+            },
+            cache_hours=168  # Cache for a week
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("rounds", [])
+
+    # =========================================================================
+    # NEW ENDPOINTS - Historical Event Stats
+    # =========================================================================
+
+    def get_historical_event_finishes(
+        self,
+        event_id: str,
+        year: int = 2025
+    ) -> List[Dict[str, Any]]:
+        """
+        Get event-level finishes, earnings, FedExCup points.
+
+        Args:
+            event_id: Event ID from event list
+            year: 2025-2026
+        """
+        data = self._request(
+            "/historical-event-data/events",
+            params={
+                "tour": "pga",
+                "event_id": event_id,
+                "year": str(year),
+                "file_format": "json"
+            },
+            cache_hours=24
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("results", [])
+
+    # =========================================================================
+    # NEW ENDPOINTS - Historical DFS Data
+    # =========================================================================
+
+    def get_dfs_event_list(self) -> List[Dict[str, Any]]:
+        """Get list of events with DFS data available."""
+        data = self._request(
+            "/historical-dfs-data/event-list",
+            params={"file_format": "json"},
+            cache_hours=168
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("events", [])
+
+    def get_dfs_points(
+        self,
+        tour: str = "pga",
+        site: str = "draftkings",
+        event_id: str = "all",
+        year: int = 2024
+    ) -> List[Dict[str, Any]]:
+        """
+        Get DFS salaries, ownerships, and actual points scored.
+
+        Args:
+            tour: pga or euro
+            site: draftkings or fanduel
+            event_id: Event ID or "all"
+            year: 2017-2025
+        """
+        data = self._request(
+            "/historical-dfs-data/points",
+            params={
+                "tour": tour,
+                "site": site,
+                "event_id": event_id,
+                "year": str(year),
+                "file_format": "json"
+            },
+            cache_hours=168
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("dfs_data", [])
+
+    # =========================================================================
+    # NEW ENDPOINTS - Historical Betting Odds (Extended)
+    # =========================================================================
+
+    def get_historical_outrights(
+        self,
+        tour: str = "pga",
+        event_id: str = "all",
+        year: int = 2024,
+        market: str = "win",
+        book: str = "consensus"
+    ) -> List[Dict[str, Any]]:
+        """
+        Get historical opening/closing odds with bet outcomes.
+
+        Args:
+            tour: pga, euro, alt
+            event_id: Event ID or "all"
+            year: 2019-2025
+            market: win, top_5, top_10, top_20, make_cut
+            book: consensus or specific book (draftkings, fanduel, etc.)
+        """
+        data = self._request(
+            "/historical-odds/outrights",
+            params={
+                "tour": tour,
+                "event_id": event_id,
+                "year": str(year),
+                "market": market,
+                "book": book,
+                "odds_format": "percent",
+                "file_format": "json"
+            },
+            cache_hours=168
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("odds", [])
+
+    def get_historical_matchups(
+        self,
+        tour: str = "pga",
+        event_id: str = "all",
+        year: int = 2024,
+        book: str = "consensus"
+    ) -> List[Dict[str, Any]]:
+        """
+        Get historical matchup and 3-ball odds with outcomes.
+
+        Args:
+            tour: pga, euro, alt
+            event_id: Event ID or "all"
+            year: 2019-2025
+            book: consensus or specific book
+        """
+        data = self._request(
+            "/historical-odds/matchups",
+            params={
+                "tour": tour,
+                "event_id": event_id,
+                "year": str(year),
+                "book": book,
+                "odds_format": "percent",
+                "file_format": "json"
+            },
+            cache_hours=168
+        )
+
+        if not data:
+            return []
+
+        return data if isinstance(data, list) else data.get("matchups", [])
+
+    # =========================================================================
+    # UTILITY - Get All Available Data for a Golfer
+    # =========================================================================
+
+    def get_golfer_full_profile(self, golfer_name: str) -> Dict[str, Any]:
+        """
+        Get comprehensive profile for a golfer combining multiple endpoints.
+
+        Returns:
+            - Skill ratings (SG categories)
+            - Approach skill by yardage
+            - Current predictions
+            - DG ranking
+            - Historical performance
+        """
+        profile = {
+            "name": golfer_name,
+            "skill_ratings": {},
+            "approach_skill": {},
+            "current_predictions": {},
+            "ranking": {},
+            "course_fits": {}
+        }
+
+        # Get skill ratings
+        skill_ratings = self.get_skill_ratings()
+        if golfer_name in skill_ratings:
+            profile["skill_ratings"] = skill_ratings[golfer_name]
+
+        # Get approach skill
+        approach_skills = self.get_approach_skill()
+        if golfer_name in approach_skills:
+            buckets = approach_skills[golfer_name]
+            profile["approach_skill"] = {
+                "50_100": buckets.sg_50_100,
+                "100_150": buckets.sg_100_150,
+                "150_200": buckets.sg_150_200,
+                "200_plus": buckets.sg_200_plus,
+                "fairway": buckets.sg_fairway,
+                "rough": buckets.sg_rough
+            }
+
+        # Get DG ranking
+        rankings = self.get_dg_rankings()
+        if golfer_name in rankings:
+            profile["ranking"] = rankings[golfer_name]
+
+        # Get current predictions
+        predictions = self.get_pre_tournament_predictions()
+        for pred in predictions:
+            if pred.golfer_name == golfer_name:
+                profile["current_predictions"] = {
+                    "win": pred.win_prob,
+                    "top_5": pred.top_5_prob,
+                    "top_10": pred.top_10_prob,
+                    "top_20": pred.top_20_prob,
+                    "make_cut": pred.make_cut_prob
+                }
+                break
+
+        # Get course fit predictions
+        course_fits = self.get_course_fit_predictions()
+        if golfer_name in course_fits:
+            profile["course_fits"] = {"current": course_fits[golfer_name]}
+
+        return profile
+
 
 def get_api() -> DataGolfAPI:
     """Get configured API client."""

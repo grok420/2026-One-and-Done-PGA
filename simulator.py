@@ -442,6 +442,195 @@ class Simulator:
         return self.simulate_tournament(golfer, tournament, n)
 
 
+    # =========================================================================
+    # Phase 3.1: Full Season Monte Carlo Simulation
+    # =========================================================================
+
+    def simulate_full_season(
+        self,
+        planned_picks: List[Tuple[Golfer, Tournament]],
+        n_simulations: int = 10000
+    ) -> Dict:
+        """
+        Run full season Monte Carlo simulation with planned picks.
+
+        Args:
+            planned_picks: List of (Golfer, Tournament) tuples for remaining season
+            n_simulations: Number of simulation iterations (default 10,000)
+
+        Returns:
+            Dict with:
+            - mean_earnings, median_earnings, std_earnings
+            - percentiles (5, 10, 25, 50, 75, 90, 95)
+            - win_distribution: histogram of wins
+            - top_10_distribution: histogram of top-10s
+            - detailed_results: per-tournament projections
+        """
+        logger.info(f"Running full season simulation: {len(planned_picks)} tournaments, {n_simulations:,} iterations")
+
+        # Initialize tracking arrays
+        season_earnings = np.zeros(n_simulations)
+        season_wins = np.zeros(n_simulations)
+        season_top_5s = np.zeros(n_simulations)
+        season_top_10s = np.zeros(n_simulations)
+        season_cuts_made = np.zeros(n_simulations)
+
+        # Per-tournament tracking
+        tournament_results = {}
+
+        for golfer, tournament in planned_picks:
+            # Get probabilities
+            probs = self.db.get_golfer_probability(golfer.name, tournament.name)
+            if probs:
+                win_prob = probs.get("win_prob", 0.02)
+                top_10_prob = probs.get("top_10_prob", 0.15)
+                top_20_prob = probs.get("top_20_prob", 0.25)
+                make_cut_prob = probs.get("make_cut_prob", 0.70)
+            else:
+                win_prob = golfer.win_probability or self._owgr_to_win_prob(golfer.owgr)
+                top_10_prob = golfer.top_10_probability or self._owgr_to_top10_prob(golfer.owgr)
+                top_20_prob = golfer.top_20_probability or top_10_prob * 1.8
+                make_cut_prob = golfer.make_cut_probability or self._owgr_to_cut_prob(golfer.owgr)
+
+            tournament_earnings = np.zeros(n_simulations)
+            tournament_wins = 0
+            tournament_top_10s = 0
+
+            for i in range(n_simulations):
+                position = self._generate_finish_position(
+                    win_prob, top_10_prob, top_20_prob, make_cut_prob,
+                    field_size=tournament.field_size, has_cut=tournament.has_cut
+                )
+                earnings = self._calculate_payout(
+                    position, tournament.purse,
+                    has_cut=tournament.has_cut, field_size=tournament.field_size
+                )
+
+                tournament_earnings[i] = earnings
+                season_earnings[i] += earnings
+
+                if position == 1:
+                    season_wins[i] += 1
+                    tournament_wins += 1
+                if 0 < position <= 5:
+                    season_top_5s[i] += 1
+                if 0 < position <= 10:
+                    season_top_10s[i] += 1
+                    tournament_top_10s += 1
+                if position > 0:
+                    season_cuts_made[i] += 1
+
+            # Store tournament results
+            tournament_results[tournament.name] = {
+                "golfer": golfer.name,
+                "mean_earnings": float(np.mean(tournament_earnings)),
+                "median_earnings": float(np.median(tournament_earnings)),
+                "win_prob": tournament_wins / n_simulations,
+                "top_10_prob": tournament_top_10s / n_simulations,
+                "percentile_10": float(np.percentile(tournament_earnings, 10)),
+                "percentile_90": float(np.percentile(tournament_earnings, 90)),
+            }
+
+        # Calculate overall season statistics
+        results = {
+            "n_simulations": n_simulations,
+            "n_tournaments": len(planned_picks),
+            "mean_earnings": float(np.mean(season_earnings)),
+            "median_earnings": float(np.median(season_earnings)),
+            "std_earnings": float(np.std(season_earnings)),
+            "percentile_5": float(np.percentile(season_earnings, 5)),
+            "percentile_10": float(np.percentile(season_earnings, 10)),
+            "percentile_25": float(np.percentile(season_earnings, 25)),
+            "percentile_50": float(np.percentile(season_earnings, 50)),
+            "percentile_75": float(np.percentile(season_earnings, 75)),
+            "percentile_90": float(np.percentile(season_earnings, 90)),
+            "percentile_95": float(np.percentile(season_earnings, 95)),
+            "mean_wins": float(np.mean(season_wins)),
+            "mean_top_5s": float(np.mean(season_top_5s)),
+            "mean_top_10s": float(np.mean(season_top_10s)),
+            "mean_cuts_made": float(np.mean(season_cuts_made)),
+            "win_distribution": {
+                "0_wins": int(np.sum(season_wins == 0)),
+                "1_win": int(np.sum(season_wins == 1)),
+                "2_wins": int(np.sum(season_wins == 2)),
+                "3_wins": int(np.sum(season_wins == 3)),
+                "4_wins": int(np.sum(season_wins == 4)),
+                "5_plus_wins": int(np.sum(season_wins >= 5)),
+            },
+            "top_10_distribution": {
+                "0-5": int(np.sum(season_top_10s <= 5)),
+                "6-10": int(np.sum((season_top_10s > 5) & (season_top_10s <= 10))),
+                "11-15": int(np.sum((season_top_10s > 10) & (season_top_10s <= 15))),
+                "16+": int(np.sum(season_top_10s > 15)),
+            },
+            "tournament_results": tournament_results,
+        }
+
+        logger.info(f"Season simulation complete: Mean ${results['mean_earnings']:,.0f}, "
+                   f"Median ${results['median_earnings']:,.0f}, "
+                   f"Avg wins: {results['mean_wins']:.1f}")
+
+        return results
+
+    def compare_allocation_strategies(
+        self,
+        available_golfers: List[Golfer],
+        remaining_tournaments: List[Tournament],
+        strategies: List[str] = None,
+        n_simulations: int = 5000
+    ) -> Dict[str, Dict]:
+        """
+        Compare different allocation strategies through simulation.
+
+        Args:
+            available_golfers: List of golfers available to pick
+            remaining_tournaments: List of upcoming tournaments
+            strategies: List of strategy names to compare
+            n_simulations: Iterations per strategy
+
+        Returns:
+            Dict of strategy_name -> simulation results
+        """
+        if strategies is None:
+            strategies = ["ev_max", "conservative", "aggressive"]
+
+        results = {}
+
+        for strategy_name in strategies:
+            logger.info(f"Simulating {strategy_name} strategy...")
+
+            # Generate picks for this strategy
+            plan = self.simulate_remaining_season(
+                available_golfers, remaining_tournaments, strategy=strategy_name
+            )
+
+            # Build the planned picks list
+            planned_picks = []
+            used = set()
+            for pick_info in plan.planned_picks:
+                golfer_name = pick_info.get("golfer")
+                tournament_name = pick_info.get("tournament")
+
+                if golfer_name in used:
+                    continue
+
+                golfer = self.db.get_golfer(golfer_name)
+                tournament = next((t for t in remaining_tournaments if t.name == tournament_name), None)
+
+                if golfer and tournament:
+                    planned_picks.append((golfer, tournament))
+                    used.add(golfer_name)
+
+            # Run full season simulation
+            sim_results = self.simulate_full_season(planned_picks, n_simulations)
+            sim_results["strategy"] = strategy_name
+            sim_results["planned_picks"] = plan.planned_picks
+
+            results[strategy_name] = sim_results
+
+        return results
+
+
 def get_simulator(n_simulations: int = None) -> Simulator:
     """Get configured simulator instance."""
     return Simulator(n_simulations)
