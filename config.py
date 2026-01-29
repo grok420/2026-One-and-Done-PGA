@@ -436,12 +436,13 @@ SCHEDULE_2026: List[Tournament] = [
     Tournament(
         name="Tour Championship",
         date=date(2026, 8, 27),
-        purse=40_000_000,
+        purse=20_000_000,  # Effective purse for OAD (winner ~$3.6M, comparable to majors)
         course="East Lake Golf Club",
         tier=Tier.TIER_1,
         is_playoff=True,
         cut_rule=CutRule.NO_CUT,  # Top 30 only, no cut
         field_size=30,
+        # Note: Starting strokes system affects effective win probability
     ),
 
     # FedEx Cup Fall Events (2026 purses)
@@ -640,6 +641,9 @@ class CourseProfile:
     # Course conditions
     rough_penalty: float = 0.0       # How penal is the rough
     wind_factor: float = 0.0         # Exposed to wind (links-style)
+    # Location for weather lookup (WGS84 coordinates)
+    latitude: float = 0.0
+    longitude: float = 0.0
 
 
 # Course profiles for 2026 PGA Tour venues
@@ -656,6 +660,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.9,              # Most demanding greens on tour
         rough_penalty=0.3,        # Light rough but position matters
         wind_factor=0.2,
+        latitude=33.5030,
+        longitude=-82.0210,
     ),
     "Aronimink Golf Club": CourseProfile(  # PGA Championship 2026
         driving_distance=0.5,
@@ -667,6 +673,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.6,
         rough_penalty=0.7,        # US PGA setup = thick rough
         wind_factor=0.1,
+        latitude=39.9342,
+        longitude=-75.4007,
     ),
     "Shinnecock Hills": CourseProfile(  # US Open 2026
         driving_distance=0.3,
@@ -678,6 +686,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.8,              # Fast, undulating
         rough_penalty=0.9,        # USGA setup = brutal rough
         wind_factor=0.8,          # Exposed links-style
+        latitude=40.8917,
+        longitude=-72.4484,
     ),
     "Royal Birkdale": CourseProfile(  # The Open 2026
         driving_distance=0.2,
@@ -689,6 +699,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.6,
         rough_penalty=0.7,
         wind_factor=0.9,          # Links = wind is major factor
+        latitude=53.5593,
+        longitude=-3.0514,
     ),
 
     # === SIGNATURE EVENTS ===
@@ -700,6 +712,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         approach_short=0.7,       # Many short approaches
         around_green=0.6,
         putting=0.7,              # Poa annua greens
+        latitude=36.5683,
+        longitude=-121.9500,
         rough_penalty=0.5,
         wind_factor=0.7,          # Ocean wind
     ),
@@ -713,6 +727,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.7,              # Kikuyu surrounds tricky
         rough_penalty=0.6,
         wind_factor=0.3,
+        latitude=34.0492,
+        longitude=-118.5008,
     ),
     "Bay Hill Club": CourseProfile(  # Arnold Palmer Invitational
         driving_distance=0.6,
@@ -724,6 +740,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.6,
         rough_penalty=0.5,
         wind_factor=0.4,
+        latitude=28.4614,
+        longitude=-81.5056,
     ),
     "TPC Sawgrass": CourseProfile(  # The Players
         driving_distance=0.3,
@@ -735,6 +753,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.7,
         rough_penalty=0.4,
         wind_factor=0.5,
+        latitude=30.1975,
+        longitude=-81.3961,
     ),
     "Harbour Town Golf Links": CourseProfile(  # RBC Heritage
         driving_distance=-0.3,    # Short course, bombers disadvantaged
@@ -746,6 +766,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.5,
         rough_penalty=0.4,
         wind_factor=0.6,
+        latitude=32.1382,
+        longitude=-80.8092,
     ),
     "Trump National Doral": CourseProfile(  # Miami Championship
         driving_distance=0.7,     # Blue Monster is long
@@ -825,6 +847,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.6,              # Poa annua
         rough_penalty=0.7,
         wind_factor=0.5,
+        latitude=32.9003,
+        longitude=-117.2514,
     ),
     "TPC Scottsdale": CourseProfile(  # WM Phoenix Open
         driving_distance=0.5,
@@ -836,6 +860,8 @@ COURSE_PROFILES: Dict[str, CourseProfile] = {
         putting=0.5,
         rough_penalty=0.3,
         wind_factor=0.3,
+        latitude=33.6420,
+        longitude=-111.9083,
     ),
     "PGA National": CourseProfile(  # Cognizant Classic
         driving_distance=0.4,

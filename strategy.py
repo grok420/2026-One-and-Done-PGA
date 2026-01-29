@@ -16,7 +16,7 @@ try:
     from .database import Database
     from .models import (
         Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
-        SimulationResult, LeagueStanding
+        SimulationResult, LeagueStanding, CourseHistory, GolferAvailability
     )
     from .simulator import Simulator
     from .api import DataGolfAPI
@@ -25,7 +25,7 @@ except ImportError:
     from database import Database
     from models import (
         Tournament, Golfer, Recommendation, SeasonPhase, Tier, CutRule,
-        SimulationResult, LeagueStanding
+        SimulationResult, LeagueStanding, CourseHistory, GolferAvailability
     )
     from simulator import Simulator
     from api import DataGolfAPI
@@ -37,6 +37,13 @@ OWGR_WARNING_THRESHOLD = 65
 HIGH_VALUE_PURSE = 15_000_000  # Majors, Players, signatures
 MID_VALUE_PURSE = 10_000_000   # Strong regular events
 BASE_PURSE = 8_000_000         # Standard events
+
+# Field strength thresholds (average OWGR)
+WEAK_FIELD_THRESHOLD = 80      # Avg OWGR > 80 = weak field
+STRONG_FIELD_THRESHOLD = 40    # Avg OWGR < 40 = strong field
+
+# Make-cut probability threshold for warnings
+MAKE_CUT_WARNING_THRESHOLD = 0.80  # Flag golfers with <80% cut probability
 
 # Strategy insight: 65% of season earnings come from best 5 events
 # Winners at majors earn $3-4.5M vs $1-2M at regular events
@@ -66,6 +73,89 @@ class Strategy:
         else:
             return SeasonPhase.PLAYOFF
 
+    def calculate_field_strength(self, tournament: Tournament) -> Tuple[float, str, str]:
+        """
+        Calculate field strength based on average OWGR of tournament field.
+
+        Returns (avg_owgr, strength_category, description).
+
+        Categories:
+        - WEAK: Avg OWGR > 80 (opposite-field, smaller events)
+        - MODERATE: Avg OWGR 40-80 (standard events)
+        - STRONG: Avg OWGR < 40 (majors, signatures)
+        """
+        # Get field predictions to determine who's playing
+        field_golfers = self.api.get_tournament_field_with_predictions(tournament.name)
+
+        if not field_golfers:
+            # Estimate based on tournament type
+            if tournament.is_major or tournament.is_signature:
+                return 35.0, "STRONG", "Elite field expected (major/signature event)"
+            elif tournament.is_opposite_field:
+                return 90.0, "WEAK", "Weak field expected (opposite-field event)"
+            else:
+                return 60.0, "MODERATE", "Standard field expected"
+
+        # Calculate average OWGR of field
+        owgr_values = [g.owgr for g in field_golfers if g.owgr < 999]
+        if not owgr_values:
+            return 60.0, "MODERATE", "Unable to determine field strength"
+
+        avg_owgr = sum(owgr_values) / len(owgr_values)
+
+        # Categorize field strength
+        if avg_owgr > WEAK_FIELD_THRESHOLD:
+            category = "WEAK"
+            description = f"Weak field (avg OWGR: {avg_owgr:.0f}) - mid-tier golfers can compete"
+        elif avg_owgr < STRONG_FIELD_THRESHOLD:
+            category = "STRONG"
+            description = f"Strong field (avg OWGR: {avg_owgr:.0f}) - elite competition"
+        else:
+            category = "MODERATE"
+            description = f"Moderate field (avg OWGR: {avg_owgr:.0f})"
+
+        return avg_owgr, category, description
+
+    def get_field_strength_multiplier(
+        self,
+        golfer: Golfer,
+        tournament: Tournament,
+        field_strength: str
+    ) -> Tuple[float, str]:
+        """
+        Calculate EV multiplier based on field strength and golfer tier.
+
+        - Weak field: Boost mid-tier (OWGR 30-60) EV by 10-15%
+        - Strong field: Slight penalty for non-elites
+
+        Returns (multiplier, explanation).
+        """
+        golfer_tier = self.classify_golfer_tier(golfer)
+
+        if field_strength == "WEAK":
+            # Weak fields favor mid-tier golfers who can compete for wins
+            if golfer_tier == "mid_tier":
+                return 1.15, "WEAK FIELD: +15% boost for mid-tier value play"
+            elif golfer_tier == "solid":
+                return 1.10, "WEAK FIELD: +10% boost for solid value play"
+            elif golfer_tier == "elite":
+                # Elites still good, but opportunity cost matters
+                return 1.0, "WEAK FIELD: Elite pick - consider saving for stronger field"
+            else:
+                return 1.05, "WEAK FIELD: +5% boost for longshot"
+
+        elif field_strength == "STRONG":
+            # Strong fields favor elites, penalize lower tiers
+            if golfer_tier == "elite":
+                return 1.05, "STRONG FIELD: Elite competing against peers"
+            elif golfer_tier == "mid_tier":
+                return 0.95, "STRONG FIELD: -5% penalty against elite competition"
+            else:
+                return 0.90, "STRONG FIELD: -10% penalty against elite competition"
+
+        else:  # MODERATE
+            return 1.0, ""
+
     def classify_golfer_tier(self, golfer: Golfer) -> str:
         """Classify golfer by tier based on OWGR."""
         if golfer.owgr <= 20:
@@ -86,6 +176,54 @@ class Strategy:
         if golfer.owgr > OWGR_WARNING_THRESHOLD:
             return True, f"OWGR {golfer.owgr} is outside top {OWGR_WARNING_THRESHOLD} - historical winners avoid these picks"
         return False, ""
+
+    def check_cut_probability_warning(
+        self,
+        golfer: Golfer,
+        tournament: Tournament
+    ) -> Tuple[bool, str, float]:
+        """
+        Check if golfer has risky make-cut probability.
+        Flag golfers with <80% make-cut probability as HIGH RISK.
+
+        Returns (has_warning, warning_message, ev_penalty_multiplier).
+        """
+        # No cut events don't need this warning
+        if not tournament.has_cut:
+            return False, "", 1.0
+
+        # Get cut probability from API predictions or golfer data
+        probs = self.db.get_golfer_probability(golfer.name, tournament.name)
+        if probs:
+            cut_prob = probs.get("make_cut_prob", golfer.make_cut_probability)
+        else:
+            cut_prob = golfer.make_cut_probability
+
+        # If no cut probability available, estimate from OWGR
+        if not cut_prob or cut_prob == 0:
+            if golfer.owgr <= 10:
+                cut_prob = 0.92
+            elif golfer.owgr <= 25:
+                cut_prob = 0.85
+            elif golfer.owgr <= 50:
+                cut_prob = 0.78
+            elif golfer.owgr <= 100:
+                cut_prob = 0.68
+            else:
+                cut_prob = 0.55
+
+        if cut_prob < MAKE_CUT_WARNING_THRESHOLD:
+            # Calculate penalty: the lower the cut probability, the higher the penalty
+            # At 70% cut prob: multiply EV by 0.9 (10% penalty)
+            # At 60% cut prob: multiply EV by 0.85 (15% penalty)
+            # At 50% cut prob: multiply EV by 0.80 (20% penalty)
+            penalty = 0.9 - (0.1 * (MAKE_CUT_WARNING_THRESHOLD - cut_prob) / 0.3)
+            penalty = max(0.75, min(0.95, penalty))  # Cap between 75% and 95%
+
+            warning_msg = f"CUT RISK: Only {cut_prob*100:.0f}% to make cut (below {MAKE_CUT_WARNING_THRESHOLD*100:.0f}% threshold)"
+            return True, warning_msg, penalty
+
+        return False, "", 1.0
 
     def calculate_course_fit(self, golfer: Golfer, tournament: Tournament) -> Tuple[float, str]:
         """
@@ -224,6 +362,7 @@ class Strategy:
 
         Key insight: 65% of season earnings come from best 5 events.
         Winners at majors earn $3-4.5M vs $1-2M at regular events.
+        Tour Championship winner ~$3.6M (comparable to majors due to starting strokes).
         """
         base_factor = 1.0
 
@@ -231,14 +370,18 @@ class Strategy:
         purse_factor = tournament.purse / BASE_PURSE
 
         # Tournament type bonuses
-        if tournament.is_major:
-            # Majors are THE events to deploy elites - winner gets $3.6-4.5M
+        if "Tour Championship" in tournament.name:
+            # Tour Championship: Winner ~$3.6M (comparable to majors)
+            # Starting strokes system affects effective win probability
+            type_bonus = 2.0
+        elif tournament.is_major:
+            # Majors are key events - winner gets $3.6-4.5M
             type_bonus = 2.0
         elif tournament.is_signature:
             # Signature events have $20M purses, winners get $3.6M
             type_bonus = 1.75
         elif tournament.is_playoff:
-            # FedEx Playoffs - Tour Championship is huge
+            # FedEx St. Jude and BMW Championship - $20M purses
             type_bonus = 1.6
         elif tournament.tier == Tier.TIER_1:
             type_bonus = 1.3
@@ -246,6 +389,145 @@ class Strategy:
             type_bonus = 1.0
 
         return base_factor * purse_factor * type_bonus
+
+    def calculate_opposite_field_boost(
+        self,
+        golfer: Golfer,
+        tournament: Tournament
+    ) -> Tuple[float, str]:
+        """
+        Calculate EV boost for opposite-field events.
+
+        Opposite-field events run concurrently with signature events and
+        feature weaker fields. Mid-tier golfers (OWGR 30-60) get a 15% boost
+        as they can realistically compete for wins without facing elite players.
+
+        Returns (multiplier, explanation).
+        """
+        if not tournament.is_opposite_field:
+            return 1.0, ""
+
+        golfer_tier = self.classify_golfer_tier(golfer)
+
+        # Mid-tier golfers (OWGR 21-50) get the biggest boost
+        if 30 <= golfer.owgr <= 60:
+            return 1.15, "OPPOSITE FIELD: +15% boost - prime spot for mid-tier value"
+        elif golfer_tier == "mid_tier":  # OWGR 21-50
+            return 1.12, "OPPOSITE FIELD: +12% boost - good mid-tier opportunity"
+        elif golfer_tier == "solid":  # OWGR 51-100
+            return 1.10, "OPPOSITE FIELD: +10% boost - solid player in weak field"
+        elif golfer_tier == "elite":
+            # Elites rarely play opposite-field events, but if they do...
+            return 1.0, "OPPOSITE FIELD: Elite in weak field (unusual)"
+        else:
+            return 1.05, "OPPOSITE FIELD: +5% boost for longshot"
+
+    # =========================================================================
+    # Phase 2.1: Course History Methods
+    # =========================================================================
+
+    def get_course_history_boost(
+        self,
+        golfer: Golfer,
+        tournament: Tournament
+    ) -> Tuple[float, str, Optional[CourseHistory]]:
+        """
+        Calculate EV boost based on historical performance at the course.
+
+        Weight recent results more heavily (last 2 years count more).
+        Returns (multiplier, explanation, course_history_object).
+        """
+        course_history = self.db.get_course_history(golfer.name, tournament.course)
+
+        if not course_history or course_history.years_played == 0:
+            return 1.0, "", None
+
+        # Calculate boost based on historical performance
+        boost = 1.0
+        reasons = []
+
+        # Past wins at this course are very valuable
+        if course_history.wins > 0:
+            win_boost = 0.10 + (course_history.wins - 1) * 0.05  # 10% for first win, +5% for each additional
+            boost += min(0.25, win_boost)  # Cap at 25%
+            reasons.append(f"{course_history.wins} win{'s' if course_history.wins > 1 else ''}")
+
+        # Strong top-5 record
+        elif course_history.top_5s >= 2:
+            boost += 0.08  # 8% boost for multiple top-5s
+            reasons.append(f"{course_history.top_5s} top-5s")
+
+        # Good top-10 record
+        elif course_history.top_10s >= 3:
+            boost += 0.05  # 5% boost for consistent top-10s
+            reasons.append(f"{course_history.top_10s} top-10s")
+
+        # Penalize poor course history
+        if course_history.avg_finish > 40 and course_history.years_played >= 3:
+            boost -= 0.05  # 5% penalty for consistently poor finishes
+            reasons.append(f"avg finish {course_history.avg_finish:.0f}")
+
+        # High cut miss rate at this course
+        if course_history.cut_rate < 0.60 and course_history.years_played >= 2:
+            boost -= 0.08  # 8% penalty for frequent cut misses
+            reasons.append(f"only {course_history.cut_rate*100:.0f}% cuts made")
+
+        # Recent form at course (last 2 years weighted more)
+        if course_history.recent_avg_finish > 0:
+            if course_history.recent_avg_finish <= 10:
+                boost += 0.05  # Recent top-10 average
+                reasons.append(f"recent avg: T{course_history.recent_avg_finish:.0f}")
+            elif course_history.recent_avg_finish <= 20:
+                boost += 0.02  # Recent top-20 average
+
+        # SG performance at course
+        if course_history.sg_total_at_course > 0.5:
+            boost += 0.03  # 3% boost for strong SG history
+            reasons.append(f"+{course_history.sg_total_at_course:.1f} SG")
+        elif course_history.sg_total_at_course < -0.5:
+            boost -= 0.03  # 3% penalty for poor SG history
+
+        # Build explanation
+        if reasons:
+            explanation = f"COURSE HISTORY: {course_history.summary}"
+        else:
+            explanation = ""
+
+        return boost, explanation, course_history
+
+    # =========================================================================
+    # Phase 2.2: Golfer Availability Check
+    # =========================================================================
+
+    def get_golfer_availability(
+        self,
+        golfer: Golfer,
+        tournament: Tournament
+    ) -> Tuple[GolferAvailability, str]:
+        """
+        Check golfer availability status for a tournament.
+
+        Returns (availability_status, explanation).
+        """
+        availability = self.db.get_golfer_availability(golfer.name, tournament.name)
+
+        if availability is None:
+            # Try to get from API
+            self.api.sync_availability_to_db(tournament.name)
+            availability = self.db.get_golfer_availability(golfer.name, tournament.name)
+
+        if availability is None:
+            return GolferAvailability.UNKNOWN, ""
+
+        explanations = {
+            GolferAvailability.CONFIRMED: "CONFIRMED: In official field",
+            GolferAvailability.LIKELY: "LIKELY: Expected to play (>75% probability)",
+            GolferAvailability.UNLIKELY: "UNLIKELY: May skip (<50% probability)",
+            GolferAvailability.OUT: "OUT: Confirmed not playing",
+            GolferAvailability.UNKNOWN: "",
+        }
+
+        return availability, explanations.get(availability, "")
 
     def should_save_elite(self, golfer: Golfer, tournament: Tournament) -> Tuple[bool, str]:
         """
@@ -614,6 +896,169 @@ class Strategy:
         # Normalize to 0-1 scale (assuming max regret around $500K)
         return min(1.0, regret / 500_000)
 
+    def calculate_future_opportunity_value(
+        self,
+        golfer: Golfer,
+        current_tournament: Tournament,
+        top_n_futures: int = 5
+    ) -> Tuple[float, float, str, List[Dict]]:
+        """
+        Calculate golfer's maximum EV across future tournaments to determine opportunity cost.
+
+        This is the KEY One and Done insight:
+        - A golfer's value at THIS tournament should be compared to their BEST future opportunity
+        - If Scheffler has $80K EV this week but $200K EV at The Masters, using him now
+          has an opportunity cost of $120K
+
+        Returns:
+            - max_future_ev: Highest projected EV at any future tournament
+            - opportunity_cost: max_future_ev - current_ev (negative = good to use now)
+            - best_future_event: Name of the best future event for this golfer
+            - future_evs: List of top future opportunities with details
+        """
+        schedule = get_schedule()
+        today = date.today()
+
+        # Get remaining tournaments after current one
+        remaining = [
+            t for t in schedule
+            if t.date > current_tournament.date
+        ]
+
+        if not remaining:
+            return 0.0, 0.0, "", []
+
+        # Calculate current EV
+        current_ev = self.simulator.calculate_ev(golfer, current_tournament)
+
+        # Calculate EV at each future tournament
+        future_opportunities = []
+
+        for future_t in remaining:
+            # Quick EV estimate based on purse and golfer skill
+            # Use OWGR-based win probability estimate
+            # Top 10 golfer: ~8-15% win prob at typical event
+            # Top 50 golfer: ~2-5% win prob
+            # Beyond 50: ~0.5-2% win prob
+
+            if golfer.owgr <= 10:
+                base_win_prob = 0.10
+            elif golfer.owgr <= 25:
+                base_win_prob = 0.05
+            elif golfer.owgr <= 50:
+                base_win_prob = 0.025
+            elif golfer.owgr <= 100:
+                base_win_prob = 0.012
+            else:
+                base_win_prob = 0.005
+
+            # Adjust for tournament tier/field strength
+            if future_t.is_major:
+                # Majors have strongest fields, but also biggest purses
+                tier_mult = 0.85  # Slightly harder to win
+                purse_mult = 1.0
+            elif future_t.tier == Tier.TIER_1:
+                tier_mult = 0.90
+                purse_mult = 1.0
+            elif future_t.is_opposite_field:
+                tier_mult = 1.3  # Easier field
+                purse_mult = 1.0
+            else:
+                tier_mult = 1.0
+                purse_mult = 1.0
+
+            adjusted_win_prob = base_win_prob * tier_mult
+
+            # Simple EV = P(win) * winner_share + P(top10) * avg_top10_payout
+            # Winner gets ~18% of purse, top 10 avg ~4%
+            win_payout = future_t.purse * 0.18
+            top10_payout = future_t.purse * 0.04
+
+            # Estimate top 10 prob as ~3x win prob
+            top10_prob = min(0.50, adjusted_win_prob * 3)
+
+            future_ev = (adjusted_win_prob * win_payout) + (top10_prob * top10_payout)
+
+            # Course fit adjustment (if we have it)
+            course_fit, _ = self.calculate_course_fit(golfer, future_t)
+            fit_adjustment = 1.0 + (course_fit * 0.08)
+            future_ev *= fit_adjustment
+
+            future_opportunities.append({
+                "tournament": future_t.name,
+                "date": future_t.date.strftime("%Y-%m-%d"),
+                "purse": future_t.purse,
+                "is_major": future_t.is_major,
+                "tier": future_t.tier.value if hasattr(future_t.tier, 'value') else str(future_t.tier),
+                "projected_ev": future_ev,
+                "win_prob": adjusted_win_prob,
+                "course_fit": course_fit,
+            })
+
+        # Sort by projected EV
+        future_opportunities.sort(key=lambda x: x["projected_ev"], reverse=True)
+
+        # Get max future EV
+        if future_opportunities:
+            max_future_ev = future_opportunities[0]["projected_ev"]
+            best_future_event = future_opportunities[0]["tournament"]
+        else:
+            max_future_ev = 0
+            best_future_event = ""
+
+        # Opportunity cost = what we give up by using golfer now
+        # Positive = we're sacrificing future value
+        # Negative = this IS the best opportunity
+        opportunity_cost = max_future_ev - current_ev
+
+        return max_future_ev, opportunity_cost, best_future_event, future_opportunities[:top_n_futures]
+
+    def calculate_relative_value(
+        self,
+        golfer: Golfer,
+        tournament: Tournament
+    ) -> Tuple[float, str]:
+        """
+        Calculate the RELATIVE value of picking this golfer at this tournament.
+
+        Relative Value = Current EV / Max Future EV
+
+        - Value > 1.0: This IS their best tournament (use now!)
+        - Value 0.8-1.0: Good opportunity (acceptable to use)
+        - Value 0.5-0.8: Mediocre opportunity (consider saving)
+        - Value < 0.5: Poor opportunity (save for better event)
+
+        Returns:
+            - relative_value: Ratio of current EV to best future EV
+            - recommendation: "USE NOW", "ACCEPTABLE", "CONSIDER SAVING", "SAVE"
+        """
+        max_future_ev, opp_cost, best_event, _ = self.calculate_future_opportunity_value(
+            golfer, tournament
+        )
+
+        current_ev = self.simulator.calculate_ev(golfer, tournament)
+
+        # Handle edge cases
+        if max_future_ev <= 0:
+            return 1.5, "USE NOW - No better future events"
+
+        if current_ev <= 0:
+            return 0.0, "SAVE - No value this week"
+
+        relative_value = current_ev / max_future_ev
+
+        # Determine recommendation
+        if relative_value >= 1.0:
+            recommendation = f"USE NOW - Best opportunity (no better future event)"
+        elif relative_value >= 0.85:
+            recommendation = f"ACCEPTABLE - Good value ({relative_value:.0%} of max)"
+        elif relative_value >= 0.60:
+            recommendation = f"CONSIDER SAVING - Better at {best_event} ({relative_value:.0%} of max)"
+        else:
+            recommendation = f"SAVE - Much better at {best_event} ({relative_value:.0%} of max)"
+
+        return relative_value, recommendation
+
     def get_recommendations(
         self,
         tournament: Tournament = None,
@@ -669,12 +1114,31 @@ class Strategy:
         tournament_value = self.calculate_tournament_value_factor(tournament)
         is_high_value_event = tournament.is_major or tournament.is_signature or tournament.purse >= HIGH_VALUE_PURSE
 
+        # Phase 1.1: Calculate field strength for this tournament
+        avg_owgr, field_strength, field_strength_desc = self.calculate_field_strength(tournament)
+        logger.info(f"Field strength: {field_strength} ({field_strength_desc})")
+
         for golfer in golfers:
             # Check for LIV golfer at non-major (skip with warning)
             liv_warning, liv_msg = self.check_liv_warning(golfer, tournament)
             if liv_warning:
                 logger.info(f"Skipping {golfer.name}: {liv_msg}")
                 continue  # Don't recommend LIV golfers for non-majors
+
+            # Phase 2.2: Check golfer availability
+            availability, availability_msg = self.get_golfer_availability(golfer, tournament)
+            if availability == GolferAvailability.OUT:
+                logger.info(f"Skipping {golfer.name}: Confirmed OUT")
+                continue  # Skip golfers confirmed out
+            if availability == GolferAvailability.UNLIKELY:
+                logger.info(f"Warning for {golfer.name}: {availability_msg}")
+                # Don't skip, but will add warning
+
+            # Phase 2.1: Get course history
+            course_history_boost, course_history_msg, course_history = self.get_course_history_boost(
+                golfer, tournament
+            )
+
             # Run simulation
             sim_result = self.simulator.simulate_tournament(golfer, tournament)
 
@@ -737,6 +1201,41 @@ class Strategy:
             elif standings_mode == "desperation" and sim_result.win_rate > 0.10:
                 standings_adjustment = 1.2  # Big boost to win probability when far behind
 
+            # Phase 1.1: Apply field strength multiplier
+            field_strength_mult, field_strength_reason = self.get_field_strength_multiplier(
+                golfer, tournament, field_strength
+            )
+
+            # Phase 1.2: Check cut probability warning
+            cut_warning, cut_warning_msg, cut_penalty = self.check_cut_probability_warning(
+                golfer, tournament
+            )
+
+            # Phase 1.3: Apply opposite-field boost
+            opposite_field_mult, opposite_field_reason = self.calculate_opposite_field_boost(
+                golfer, tournament
+            )
+
+            # NEW: Calculate RELATIVE VALUE (opportunity cost adjustment)
+            # This is the KEY One and Done insight:
+            # Compare golfer's EV here vs their BEST future opportunity
+            relative_value, relative_recommendation = self.calculate_relative_value(
+                golfer, tournament
+            )
+
+            # Convert relative value to multiplier
+            # relative_value >= 1.0: This IS their best event, boost EV
+            # relative_value < 1.0: Better opportunities exist, penalize EV
+            # Scale: 0.5 relative value = 0.7x multiplier (30% penalty)
+            #        1.0 relative value = 1.0x multiplier (no change)
+            #        1.5 relative value = 1.15x multiplier (15% boost)
+            if relative_value >= 1.0:
+                relative_value_mult = 1.0 + (min(relative_value - 1.0, 0.5) * 0.3)  # Up to 15% boost
+            else:
+                # Penalize picks that waste golfer on suboptimal events
+                # 0.5 relative = 0.7x, 0.8 relative = 0.88x
+                relative_value_mult = 0.4 + (relative_value * 0.6)
+
             # Final score combines:
             # - Base EV (simulation mean)
             # - Win probability value (don't waste high win% at small events)
@@ -745,7 +1244,15 @@ class Strategy:
             # - Elite deployment factor
             # - Course fit adjustment
             # - Standings-based risk adjustment
-            expected_value = base_ev * win_prob_multiplier * hedge_bonus * phase_multiplier * elite_save_penalty * course_fit_ev_factor * standings_adjustment
+            # - Field strength adjustment (Phase 1.1)
+            # - Cut probability penalty (Phase 1.2)
+            # - Opposite-field boost (Phase 1.3)
+            # - Course history boost (Phase 2.1)
+            # - RELATIVE VALUE (opportunity cost) - NEW
+            expected_value = (base_ev * win_prob_multiplier * hedge_bonus * phase_multiplier *
+                            elite_save_penalty * course_fit_ev_factor * standings_adjustment *
+                            field_strength_mult * cut_penalty * opposite_field_mult *
+                            course_history_boost * relative_value_mult)
 
             # Check OWGR warning
             owgr_warning, owgr_msg = self.check_owgr_warning(golfer)
@@ -754,8 +1261,29 @@ class Strategy:
             reasoning = self._build_reasoning(
                 golfer, tournament, sim_result, hedge_bonus, phase, regret_risk
             )
+
+            # Phase 1.2: Add cut probability warning
+            if cut_warning:
+                reasoning = f"HIGH RISK: {cut_warning_msg} | {reasoning}"
+
             if owgr_warning:
                 reasoning = f"WARNING: {owgr_msg} | {reasoning}"
+
+            # Phase 1.1: Add field strength context
+            if field_strength_reason:
+                reasoning = f"{field_strength_reason} | {reasoning}"
+
+            # Phase 1.3: Add opposite-field context
+            if opposite_field_reason:
+                reasoning = f"{opposite_field_reason} | {reasoning}"
+
+            # Phase 2.1: Add course history context
+            if course_history_msg:
+                reasoning = f"{course_history_msg} | {reasoning}"
+
+            # Phase 2.2: Add availability warning
+            if availability == GolferAvailability.UNLIKELY:
+                reasoning = f"AVAILABILITY WARNING: {availability_msg} | {reasoning}"
 
             # Add win probability strategic advice for high win% golfers
             if sim_result.win_rate >= 0.10:  # 10%+ win probability
@@ -782,12 +1310,71 @@ class Strategy:
                 fit_sign = "+" if course_fit > 0 else ""
                 reasoning = f"COURSE FIT: {fit_sign}{course_fit:.2f} SG/rd ({course_fit_explanation}) | {reasoning}"
 
+            # Add RELATIVE VALUE context (opportunity cost)
+            if relative_value < 0.7:
+                reasoning = f"⚠️ SAVE: {relative_recommendation} | {reasoning}"
+            elif relative_value < 0.85:
+                reasoning = f"CONSIDER SAVING: {relative_recommendation} | {reasoning}"
+            elif relative_value >= 1.0:
+                reasoning = f"✓ OPTIMAL: {relative_recommendation} | {reasoning}"
+
             # Add standings context if adjusting strategy
             if standings_adjustment != 1.0:
                 if standings_mode == "protect":
                     reasoning = f"STANDINGS: Protecting lead - favor consistency | {reasoning}"
                 elif standings_mode in ("aggressive", "desperation"):
                     reasoning = f"STANDINGS: Trailing - need upside ({standings_adjustment:.0%} boost) | {reasoning}"
+
+            # Get best future event name for display
+            _, _, best_future_event, _ = self.calculate_future_opportunity_value(
+                golfer, tournament, top_n_futures=1
+            )
+
+            # NEW: Generate plain English reasoning
+            plain_english_bullets = self._generate_plain_english_bullets(
+                golfer=golfer,
+                tournament=tournament,
+                sim=sim_result,
+                course_fit=course_fit,
+                relative_value=relative_value,
+                best_future_event=best_future_event,
+                field_strength=field_strength,
+                course_history_summary=course_history.summary if course_history else "",
+            )
+
+            # NEW: Calculate factor contributions (additive model)
+            factor_contributions = self._calculate_factor_contributions(
+                base_ev=base_ev,
+                course_fit=course_fit,
+                timing_mult=relative_value_mult,
+                field_mult=field_strength_mult,
+                hedge_mult=hedge_bonus,
+                phase_mult=phase_multiplier,
+                course_history_boost=course_history_boost,
+            )
+
+            # NEW: Calculate timing verdict
+            timing_verdict = self._calculate_timing_verdict(
+                relative_value=relative_value,
+                best_future_event=best_future_event,
+            )
+
+            # NEW: Calculate confidence percentage
+            confidence_pct = self._calculate_confidence_pct(
+                golfer=golfer,
+                sim=sim_result,
+                course_history=course_history,
+                availability_status=availability.value if availability else "",
+            )
+
+            # NEW: Generate risk flags
+            risk_flags = self._generate_risk_flags(
+                golfer=golfer,
+                sim=sim_result,
+                owgr_warning=owgr_warning,
+                cut_warning=cut_warning,
+                availability_status=availability.value if availability else "",
+            )
 
             rec = Recommendation(
                 golfer=golfer,
@@ -802,6 +1389,23 @@ class Strategy:
                 reasoning=reasoning,
                 course_fit_sg=course_fit,
                 owgr_warning=owgr_warning,
+                # Phase 1 additions
+                cut_warning=cut_warning,
+                field_strength=field_strength,
+                is_opposite_field=tournament.is_opposite_field,
+                # Phase 2 additions
+                course_history_summary=course_history.summary if course_history else "",
+                availability_status=availability.value if availability else "",
+                # Opportunity cost / relative value
+                relative_value=relative_value,
+                best_future_event=best_future_event,
+                # NEW: Plain English reasoning fields
+                plain_english_bullets=plain_english_bullets,
+                factor_contributions=factor_contributions,
+                timing_verdict=timing_verdict,
+                confidence_pct=confidence_pct,
+                risk_flags=risk_flags,
+                base_ev=base_ev,
             )
             recommendations.append(rec)
 
@@ -909,6 +1513,197 @@ class Strategy:
             parts.append("SAFE")
 
         return " | ".join(parts)
+
+    def _generate_plain_english_bullets(
+        self,
+        golfer: Golfer,
+        tournament: Tournament,
+        sim: SimulationResult,
+        course_fit: float,
+        relative_value: float,
+        best_future_event: str,
+        field_strength: str,
+        course_history_summary: str,
+    ) -> List[str]:
+        """Generate 3-5 plain English bullet points explaining the pick."""
+        bullets = []
+
+        # 1. Course fit reasoning
+        if course_fit >= 0.3:
+            bullets.append(f"Excellent course fit at {tournament.course} (+{course_fit:.2f} SG/round)")
+        elif course_fit >= 0.1:
+            bullets.append(f"Good course fit at {tournament.course} (+{course_fit:.2f} SG/round)")
+        elif course_fit <= -0.2:
+            bullets.append(f"Poor course fit at {tournament.course} ({course_fit:.2f} SG/round)")
+
+        # 2. Timing/opportunity reasoning
+        if relative_value >= 1.0:
+            bullets.append("Optimal timing - this is his best remaining opportunity")
+        elif relative_value >= 0.85:
+            bullets.append(f"Good timing - close to optimal value ({relative_value:.0%} of best)")
+        elif relative_value >= 0.6:
+            bullets.append(f"Consider saving for {best_future_event} ({relative_value:.0%} of best value)")
+        else:
+            bullets.append(f"Save for {best_future_event} - much better opportunity ahead")
+
+        # 3. Win probability reasoning
+        if sim.win_rate >= 0.10:
+            if tournament.is_major or tournament.is_signature:
+                bullets.append(f"Strong {sim.win_rate*100:.1f}% win probability at premium event")
+            else:
+                bullets.append(f"High {sim.win_rate*100:.1f}% win probability (consider saving for bigger event)")
+        elif sim.win_rate >= 0.05:
+            bullets.append(f"Solid {sim.win_rate*100:.1f}% win probability with {sim.top_10_rate*100:.0f}% top-10 chance")
+
+        # 4. Field strength reasoning
+        if field_strength == "WEAK":
+            if golfer.owgr <= 50:
+                bullets.append("Weak field gives mid-tier player strong winning chance")
+        elif field_strength == "STRONG":
+            if golfer.owgr <= 20:
+                bullets.append("Strong field favors elite deployment now")
+
+        # 5. Course history reasoning
+        if course_history_summary and "win" in course_history_summary.lower():
+            bullets.append(f"Proven winner here - {course_history_summary}")
+        elif course_history_summary and "top-5" in course_history_summary.lower():
+            bullets.append(f"Strong course history - {course_history_summary}")
+
+        # 6. Cut probability reasoning
+        if sim.cut_rate >= 0.90:
+            bullets.append(f"Very safe pick - {sim.cut_rate*100:.0f}% make cut probability")
+        elif sim.cut_rate < 0.75:
+            bullets.append(f"Risky pick - only {sim.cut_rate*100:.0f}% make cut probability")
+
+        # Limit to 5 bullets, prioritizing the first ones
+        return bullets[:5]
+
+    def _calculate_factor_contributions(
+        self,
+        base_ev: float,
+        course_fit: float,
+        timing_mult: float,
+        field_mult: float,
+        hedge_mult: float,
+        phase_mult: float,
+        course_history_boost: float,
+    ) -> Dict[str, float]:
+        """
+        Calculate dollar contribution of each factor.
+        Uses additive model with caps for transparency.
+        """
+        contributions = {}
+
+        # Course fit: $15K per 0.1 SG/round, capped at ±$50K
+        course_fit_adj = min(max(course_fit * 150000, -50000), 50000)
+        contributions["course_fit"] = course_fit_adj
+
+        # Timing (relative value): up to ±$50K
+        timing_adj = min(max((timing_mult - 1.0) * base_ev, -50000), 50000)
+        contributions["timing"] = timing_adj
+
+        # Field strength: up to ±$30K
+        field_adj = min(max((field_mult - 1.0) * base_ev, -30000), 30000)
+        contributions["field_strength"] = field_adj
+
+        # Hedge bonus: up to ±$15K
+        hedge_adj = min(max((hedge_mult - 1.0) * base_ev, -15000), 15000)
+        contributions["hedge"] = hedge_adj
+
+        # Phase/elite deployment: up to ±$40K
+        phase_adj = min(max((phase_mult - 1.0) * base_ev, -40000), 40000)
+        contributions["phase"] = phase_adj
+
+        # Course history: up to ±$25K
+        history_adj = min(max((course_history_boost - 1.0) * base_ev, -25000), 25000)
+        contributions["course_history"] = history_adj
+
+        return contributions
+
+    def _calculate_timing_verdict(
+        self,
+        relative_value: float,
+        best_future_event: str,
+    ) -> str:
+        """
+        Calculate clear timing verdict for display.
+        Returns: "USE NOW", "SAVE FOR [EVENT]", or "TOSS-UP"
+        """
+        if relative_value >= 0.95:
+            return "USE NOW"
+        elif relative_value >= 0.80:
+            return "TOSS-UP"
+        elif best_future_event:
+            return f"SAVE FOR {best_future_event.upper()}"
+        else:
+            return "SAVE"
+
+    def _calculate_confidence_pct(
+        self,
+        golfer: Golfer,
+        sim: SimulationResult,
+        course_history: 'CourseHistory',
+        availability_status: str,
+    ) -> int:
+        """
+        Calculate confidence percentage (0-100) based on data quality.
+        """
+        confidence = 50  # Base confidence
+
+        # Simulation quality (+20 max)
+        if sim.n_simulations >= 50000:
+            confidence += 20
+        elif sim.n_simulations >= 10000:
+            confidence += 10
+
+        # Course history data (+15 max)
+        if course_history and course_history.years_played >= 4:
+            confidence += 15
+        elif course_history and course_history.years_played >= 2:
+            confidence += 8
+
+        # OWGR rank quality (+10 max)
+        if golfer.owgr <= 20:
+            confidence += 10
+        elif golfer.owgr <= 50:
+            confidence += 5
+
+        # Availability status (+5 max)
+        if availability_status == "confirmed":
+            confidence += 5
+        elif availability_status == "unlikely":
+            confidence -= 10
+
+        # Cut probability consistency
+        if sim.cut_rate >= 0.85:
+            confidence += 5
+
+        return min(100, max(0, confidence))
+
+    def _generate_risk_flags(
+        self,
+        golfer: Golfer,
+        sim: SimulationResult,
+        owgr_warning: bool,
+        cut_warning: bool,
+        availability_status: str,
+    ) -> List[str]:
+        """Generate list of risk flags for display."""
+        flags = []
+
+        if owgr_warning:
+            flags.append(f"OWGR {golfer.owgr} (outside top 65)")
+
+        if cut_warning:
+            flags.append(f"Cut probability {sim.cut_rate*100:.0f}% (below 80%)")
+
+        if availability_status == "unlikely":
+            flags.append("May not play (UNLIKELY status)")
+
+        if sim.std_earnings > sim.mean_earnings:
+            flags.append("High variance (inconsistent)")
+
+        return flags
 
     def analyze_opponent_patterns(self) -> Dict:
         """
@@ -1132,6 +1927,236 @@ class Strategy:
             "regret_analysis": regret,
             "recommendation": "PICK" if regret["regret_risk"] < sim.mean_earnings * 0.2 else "CONSIDER ALTERNATIVES",
         }
+
+
+    # =========================================================================
+    # Phase 3.2: Multi-Entry Strategy Support
+    # =========================================================================
+
+    def get_multi_entry_recommendations(
+        self,
+        tournament: Tournament,
+        num_entries: int = 2,
+        top_n_per_entry: int = 3
+    ) -> Dict[int, List[Recommendation]]:
+        """
+        Get differentiated recommendations for multiple entries.
+
+        The strategy is to hedge by picking different golfers across entries:
+        - Entry 1: Best EV picks (maximize expected value)
+        - Entry 2+: Diversify with underowned/different golfers
+
+        Returns dict of entry_id -> list of recommendations.
+        """
+        if num_entries < 1:
+            return {}
+
+        all_recs = self.get_recommendations(tournament, top_n=top_n_per_entry * num_entries * 2)
+
+        if not all_recs:
+            return {}
+
+        result = {}
+        used_golfers = set()
+
+        for entry_num in range(1, num_entries + 1):
+            entry_recs = []
+
+            for rec in all_recs:
+                if rec.golfer.name in used_golfers:
+                    continue
+
+                # For entry 1, just take top EV picks
+                # For subsequent entries, prioritize different golfers
+                if entry_num == 1:
+                    entry_recs.append(rec)
+                else:
+                    # Boost hedge bonus importance for hedging entries
+                    adjusted_rec = rec
+                    entry_recs.append(adjusted_rec)
+
+                if len(entry_recs) >= top_n_per_entry:
+                    break
+
+            # Mark golfers as used across entries
+            for rec in entry_recs:
+                used_golfers.add(rec.golfer.name)
+
+            result[entry_num] = entry_recs
+
+        return result
+
+    def get_hedging_picks(
+        self,
+        tournament: Tournament,
+        primary_pick: str,
+        num_hedge_picks: int = 2
+    ) -> List[Recommendation]:
+        """
+        Get hedge picks that are different from the primary pick.
+
+        Good hedges are golfers with:
+        - Different win probability tier
+        - Low correlation with primary pick (different style)
+        - Underused by opponents
+        """
+        all_recs = self.get_recommendations(tournament, top_n=20)
+
+        if not all_recs:
+            return []
+
+        # Find the primary pick
+        primary_rec = next((r for r in all_recs if r.golfer.name == primary_pick), None)
+
+        if not primary_rec:
+            # Primary not in top 20, just return top picks excluding primary
+            return [r for r in all_recs if r.golfer.name != primary_pick][:num_hedge_picks]
+
+        # Score potential hedges
+        hedge_candidates = []
+        primary_tier = self.classify_golfer_tier(primary_rec.golfer)
+        primary_win_prob = primary_rec.golfer.win_probability
+
+        for rec in all_recs:
+            if rec.golfer.name == primary_pick:
+                continue
+
+            hedge_score = rec.expected_value
+
+            # Bonus for different tier (diversification)
+            rec_tier = self.classify_golfer_tier(rec.golfer)
+            if rec_tier != primary_tier:
+                hedge_score *= 1.1  # 10% bonus for tier diversification
+
+            # Bonus for different win probability level
+            rec_win_prob = rec.golfer.win_probability
+            if abs(rec_win_prob - primary_win_prob) > 0.05:
+                hedge_score *= 1.05  # 5% bonus for different win prob
+
+            # Bonus for high hedge value (underused)
+            if rec.hedge_bonus > 0.05:
+                hedge_score *= 1.1
+
+            hedge_candidates.append((rec, hedge_score))
+
+        # Sort by hedge score
+        hedge_candidates.sort(key=lambda x: x[1], reverse=True)
+
+        return [r for r, _ in hedge_candidates[:num_hedge_picks]]
+
+    # =========================================================================
+    # Phase 3.3: Segment Optimization
+    # =========================================================================
+
+    def get_segment_optimization(
+        self,
+        num_segments: int = 6
+    ) -> Dict:
+        """
+        Optimize picks within season segments.
+
+        Divides the season into segments (e.g., 6 segments of ~6-7 events each)
+        and ensures proper elite distribution across segments.
+
+        Strategy:
+        - Each segment should have 0-1 elite picks
+        - Majors get priority for elites
+        - Balance risk across segments
+        """
+        schedule = get_schedule()
+        today = date.today()
+        remaining = [t for t in schedule if t.date >= today]
+
+        if not remaining:
+            return {"error": "No remaining tournaments"}
+
+        # Divide into segments
+        segment_size = max(1, len(remaining) // num_segments)
+        segments = []
+
+        for i in range(num_segments):
+            start_idx = i * segment_size
+            end_idx = start_idx + segment_size if i < num_segments - 1 else len(remaining)
+            segment_tournaments = remaining[start_idx:end_idx]
+
+            if segment_tournaments:
+                segments.append({
+                    "segment_num": i + 1,
+                    "tournaments": segment_tournaments,
+                    "has_major": any(t.is_major for t in segment_tournaments),
+                    "has_signature": any(t.is_signature for t in segment_tournaments),
+                    "total_purse": sum(t.purse for t in segment_tournaments),
+                    "recommended_elite_count": 1 if any(t.is_major for t in segment_tournaments) else 0,
+                })
+
+        # Get available golfers
+        used_golfers = set(self.db.get_used_golfers())
+        all_golfers = self.db.get_all_golfers()
+        available_elites = [g for g in all_golfers if g.owgr <= 20 and g.name not in used_golfers]
+        available_mid = [g for g in all_golfers if 20 < g.owgr <= 50 and g.name not in used_golfers]
+
+        # Allocate elites to segments with majors
+        elite_allocations = {}
+        remaining_elites = list(available_elites)
+
+        for segment in segments:
+            if segment["has_major"] and remaining_elites:
+                # Find the major in this segment
+                major = next((t for t in segment["tournaments"] if t.is_major), None)
+                if major:
+                    # Assign best available elite
+                    best_elite = min(remaining_elites, key=lambda g: g.owgr)
+                    elite_allocations[major.name] = best_elite.name
+                    remaining_elites.remove(best_elite)
+                    segment["assigned_elite"] = best_elite.name
+                    segment["elite_tournament"] = major.name
+
+        # Build segment recommendations
+        segment_recommendations = []
+        for segment in segments:
+            segment_recs = {
+                "segment_num": segment["segment_num"],
+                "start_date": segment["tournaments"][0].date.strftime("%b %d"),
+                "end_date": segment["tournaments"][-1].date.strftime("%b %d"),
+                "num_events": len(segment["tournaments"]),
+                "has_major": segment["has_major"],
+                "has_signature": segment["has_signature"],
+                "total_purse": segment["total_purse"],
+                "elite_pick": segment.get("assigned_elite"),
+                "elite_tournament": segment.get("elite_tournament"),
+                "tournament_names": [t.name for t in segment["tournaments"]],
+            }
+            segment_recommendations.append(segment_recs)
+
+        return {
+            "num_segments": num_segments,
+            "total_remaining_events": len(remaining),
+            "available_elites": len(available_elites),
+            "available_mid_tier": len(available_mid),
+            "segments": segment_recommendations,
+            "elite_allocations": elite_allocations,
+            "strategy_notes": self._get_segment_strategy_notes(segments),
+        }
+
+    def _get_segment_strategy_notes(self, segments: List[Dict]) -> List[str]:
+        """Generate strategy notes for segment optimization."""
+        notes = []
+
+        # Count majors and signatures
+        majors = sum(1 for s in segments if s["has_major"])
+        signatures = sum(1 for s in segments if s["has_signature"])
+
+        notes.append(f"Season has {majors} majors and {signatures} signature events remaining")
+
+        # Elite deployment advice
+        elites_assigned = sum(1 for s in segments if s.get("assigned_elite"))
+        notes.append(f"Recommended elite deployments: {elites_assigned} (for majors)")
+
+        # Risk distribution
+        high_value_segments = sum(1 for s in segments if s["total_purse"] > 50_000_000)
+        notes.append(f"High-value segments (>$50M purse): {high_value_segments}")
+
+        return notes
 
 
 def get_strategy() -> Strategy:

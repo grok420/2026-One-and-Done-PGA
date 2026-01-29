@@ -51,7 +51,9 @@ class Tournament:
 
     @property
     def winner_share(self) -> int:
-        """Winner typically gets 18% of purse."""
+        """Winner's share of purse."""
+        # Standard events: winner gets 18% of purse
+        # Tour Championship included - $45M * 18% = $8.1M
         return int(self.purse * 0.18)
 
     @property
@@ -188,6 +190,24 @@ class Recommendation:
     reasoning: str = ""
     course_fit_sg: float = 0.0  # Course fit adjustment (SG/round)
     owgr_warning: bool = False  # True if golfer OWGR > 65
+    # Phase 1 additions
+    cut_warning: bool = False  # True if make-cut probability < 80%
+    field_strength: str = ""  # WEAK, MODERATE, or STRONG
+    is_opposite_field: bool = False  # True if opposite-field event
+    # Phase 2 additions
+    course_history_summary: str = ""  # Summary of course history
+    availability_status: str = ""  # CONFIRMED, LIKELY, UNLIKELY, OUT, UNKNOWN
+    # Opportunity cost / Relative value
+    relative_value: float = 1.0  # Current EV / Best Future EV (>1 = use now, <1 = save)
+    best_future_event: str = ""  # Name of best future tournament for this golfer
+
+    # NEW: Plain English reasoning fields
+    plain_english_bullets: List[str] = field(default_factory=list)  # ["Best course fit (+0.42 SG)", ...]
+    factor_contributions: Dict[str, float] = field(default_factory=dict)  # {"course_fit": 48000, "timing": 42000, ...}
+    timing_verdict: str = ""  # "USE NOW" / "SAVE FOR MASTERS" / "TOSS-UP"
+    confidence_pct: int = 0  # 0-100 based on data quality
+    risk_flags: List[str] = field(default_factory=list)  # ["OWGR > 65", "Cut probability < 80%"]
+    base_ev: float = 0.0  # Base EV before adjustments (for waterfall chart)
 
     @property
     def total_score(self) -> float:
@@ -198,6 +218,15 @@ class Recommendation:
     def has_owgr_risk(self) -> bool:
         """Check if pick has OWGR risk (>65 never won in prior year)."""
         return self.golfer.owgr > 65
+
+    @property
+    def timing_color(self) -> str:
+        """Get color for timing verdict display."""
+        if "NOW" in self.timing_verdict:
+            return "green"
+        elif "SAVE" in self.timing_verdict:
+            return "orange"
+        return "gray"
 
 
 @dataclass
@@ -252,3 +281,84 @@ class WhatIfScenario:
     alternative_outcome: SimulationResult
     regret_if_wrong: float  # Potential loss vs alternative
     upside_if_right: float  # Potential gain vs alternative
+
+
+@dataclass
+class CourseHistory:
+    """Historical performance at a course (Phase 2.1)."""
+    golfer_name: str
+    course_name: str
+    tournament_name: str
+    years_played: int = 0  # Number of years with data
+    avg_finish: float = 0.0  # Average finish position
+    best_finish: int = 999  # Best finish position
+    wins: int = 0  # Number of wins at course
+    top_5s: int = 0  # Number of top-5 finishes
+    top_10s: int = 0  # Number of top-10 finishes
+    cuts_made: int = 0  # Number of cuts made
+    missed_cuts: int = 0  # Number of missed cuts
+    total_earnings: int = 0  # Total earnings at course
+    sg_total_at_course: float = 0.0  # Average SG at this course
+    # Recent performance (last 2 years weighted more)
+    recent_avg_finish: float = 0.0
+    recent_sg: float = 0.0
+
+    @property
+    def cut_rate(self) -> float:
+        """Calculate make-cut percentage at this course."""
+        total = self.cuts_made + self.missed_cuts
+        return self.cuts_made / total if total > 0 else 0.0
+
+    @property
+    def is_strong_course_fit(self) -> bool:
+        """Check if golfer has strong historical performance."""
+        return self.avg_finish <= 20 and self.cuts_made >= 3
+
+    @property
+    def summary(self) -> str:
+        """Get summary of course history."""
+        if self.years_played == 0:
+            return "No course history"
+        parts = []
+        if self.wins > 0:
+            parts.append(f"{self.wins} win{'s' if self.wins > 1 else ''}")
+        if self.top_5s > 0:
+            parts.append(f"{self.top_5s} top-5{'s' if self.top_5s > 1 else ''}")
+        if self.top_10s > 0:
+            parts.append(f"{self.top_10s} top-10{'s' if self.top_10s > 1 else ''}")
+        parts.append(f"avg finish: {self.avg_finish:.0f}")
+        return f"{self.years_played}yr: " + ", ".join(parts)
+
+
+class GolferAvailability(Enum):
+    """Golfer availability status for a tournament (Phase 2.2)."""
+    CONFIRMED = "confirmed"  # In official field
+    LIKELY = "likely"  # Expected to play (>75% probability)
+    UNLIKELY = "unlikely"  # May skip (<50% probability)
+    OUT = "out"  # Confirmed not playing
+    UNKNOWN = "unknown"  # No data available
+
+
+@dataclass
+class SeasonPlanEntry:
+    """A single entry in the season plan (Phase 2.3)."""
+    tournament_name: str
+    tournament_date: date
+    golfer_name: Optional[str] = None  # None if not yet assigned
+    is_tentative: bool = True  # False if locked in
+    projected_ev: float = 0.0
+    notes: str = ""
+
+    @property
+    def is_assigned(self) -> bool:
+        return self.golfer_name is not None
+
+
+@dataclass
+class Entry:
+    """Multi-entry support (Phase 3.2)."""
+    entry_id: int
+    entry_name: str  # e.g., "Entry 1", "Main Entry", "Hedge Entry"
+    picks: List[Pick] = field(default_factory=list)
+    total_earnings: int = 0
+    used_golfers: List[str] = field(default_factory=list)
