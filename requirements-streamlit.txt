@@ -1,0 +1,16 @@
+# Requirements for Streamlit Cloud deployment
+# Use this file when deploying to share.streamlit.io
+
+# Core
+python-dotenv>=1.0.0
+
+# HTTP client
+requests>=2.31.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Web UI
+streamlit>=1.28.0
+plotly>=5.18.0

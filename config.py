@@ -64,11 +64,19 @@ class Config:
     datagolf_base_url: str = "https://feeds.datagolf.com"
 
     def __post_init__(self):
-        """Load credentials from environment."""
+        """Load credentials from environment or Streamlit secrets."""
         self.site_email = os.getenv("PGA_OAD_EMAIL", "")
         self.site_password = os.getenv("PGA_OAD_PASSWORD", "")
         self.site_username = os.getenv("PGA_OAD_USERNAME", "")
         self.datagolf_api_key = os.getenv("DATAGOLF_API_KEY", "")
+
+        # Try Streamlit secrets if env var not set (for Streamlit Cloud)
+        if not self.datagolf_api_key:
+            try:
+                import streamlit as st
+                self.datagolf_api_key = st.secrets.get("DATAGOLF_API_KEY", "")
+            except Exception:
+                pass  # Not running in Streamlit or secrets not configured
 
         # Ensure directories exist with error handling
         try:

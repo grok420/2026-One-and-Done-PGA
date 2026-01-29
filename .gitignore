@@ -66,3 +66,4 @@ data/
 *.csv
 *.json
 !package.json
+farmers_2026.html
