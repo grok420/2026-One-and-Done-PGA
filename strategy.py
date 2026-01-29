@@ -60,6 +60,221 @@ class Strategy:
         self.db = Database()
         self.simulator = Simulator()
         self.api = DataGolfAPI()
+        # Cached enhanced data from API
+        self._cached_decompositions = None
+        self._cached_approach_skill = None
+        self._cached_dg_rankings = None
+        self._cached_betting_odds = None
+        self._cached_skill_ratings = None
+
+    def _fetch_enhanced_data(self, tournament: Tournament) -> Dict[str, Any]:
+        """
+        Fetch ALL available API data for enhanced recommendations.
+        Caches data to avoid repeated API calls.
+        """
+        enhanced_data = {}
+
+        # 1. Player Decompositions - detailed SG breakdown by category
+        if self._cached_decompositions is None:
+            try:
+                self._cached_decompositions = self.api.get_player_decompositions()
+                logger.info(f"Fetched decompositions for {len(self._cached_decompositions)} players")
+            except Exception as e:
+                logger.warning(f"Failed to fetch decompositions: {e}")
+                self._cached_decompositions = {}
+        enhanced_data['decompositions'] = self._cached_decompositions
+
+        # 2. Approach Skill - SG by yardage bucket and lie
+        if self._cached_approach_skill is None:
+            try:
+                self._cached_approach_skill = self.api.get_approach_skill()
+                logger.info(f"Fetched approach skill for {len(self._cached_approach_skill)} players")
+            except Exception as e:
+                logger.warning(f"Failed to fetch approach skill: {e}")
+                self._cached_approach_skill = {}
+        enhanced_data['approach_skill'] = self._cached_approach_skill
+
+        # 3. DG Rankings - true skill ratings
+        if self._cached_dg_rankings is None:
+            try:
+                self._cached_dg_rankings = self.api.get_dg_rankings()
+                logger.info(f"Fetched DG rankings for {len(self._cached_dg_rankings)} players")
+            except Exception as e:
+                logger.warning(f"Failed to fetch DG rankings: {e}")
+                self._cached_dg_rankings = {}
+        enhanced_data['dg_rankings'] = self._cached_dg_rankings
+
+        # 4. Skill Ratings - overall skill estimates
+        if self._cached_skill_ratings is None:
+            try:
+                self._cached_skill_ratings = self.api.get_skill_ratings()
+                logger.info(f"Fetched skill ratings for {len(self._cached_skill_ratings)} players")
+            except Exception as e:
+                logger.warning(f"Failed to fetch skill ratings: {e}")
+                self._cached_skill_ratings = {}
+        enhanced_data['skill_ratings'] = self._cached_skill_ratings
+
+        # 5. Betting Odds - market consensus (fresh each tournament)
+        try:
+            self._cached_betting_odds = self.api.get_betting_outrights()
+            logger.info(f"Fetched betting odds for {len(self._cached_betting_odds)} players")
+        except Exception as e:
+            logger.warning(f"Failed to fetch betting odds: {e}")
+            self._cached_betting_odds = {}
+        enhanced_data['betting_odds'] = self._cached_betting_odds
+
+        return enhanced_data
+
+    def _calculate_sg_course_match(
+        self,
+        golfer_name: str,
+        tournament: Tournament,
+        decompositions: Dict,
+        approach_skill: Dict
+    ) -> Tuple[float, str]:
+        """
+        Calculate how well a golfer's SG profile matches the course demands.
+        Uses detailed decomposition data for precise course fit.
+
+        Returns (adjustment_sg, explanation)
+        """
+        course_profile = get_course_profile(tournament.course)
+        if not course_profile:
+            return 0.0, "No course profile available"
+
+        # Get player decomposition
+        player_decomp = decompositions.get(golfer_name, {})
+        player_approach = approach_skill.get(golfer_name)
+
+        if not player_decomp:
+            return 0.0, "No player decomposition data"
+
+        # Calculate weighted course fit based on course profile
+        sg_adjustment = 0.0
+        factors = []
+
+        # Off-the-tee fit
+        if 'sg_ott' in player_decomp:
+            ott_sg = player_decomp['sg_ott']
+            # Driving distance course weight
+            if course_profile.driving_distance > 0.3:
+                adjustment = ott_sg * course_profile.driving_distance * 0.5
+                sg_adjustment += adjustment
+                if abs(adjustment) > 0.05:
+                    factors.append(f"OTT {'advantage' if adjustment > 0 else 'disadvantage'} ({adjustment:+.2f})")
+
+        # Approach fit (use detailed buckets if available)
+        if player_approach:
+            # Long approach (200+)
+            if hasattr(player_approach, 'sg_200_plus') and course_profile.approach_long > 0.3:
+                adjustment = player_approach.sg_200_plus * course_profile.approach_long * 0.4
+                sg_adjustment += adjustment
+                if abs(adjustment) > 0.05:
+                    factors.append(f"Long approach {'strength' if adjustment > 0 else 'weakness'}")
+
+            # Mid approach (150-200)
+            if hasattr(player_approach, 'sg_150_200') and course_profile.approach_mid > 0.3:
+                adjustment = player_approach.sg_150_200 * course_profile.approach_mid * 0.4
+                sg_adjustment += adjustment
+
+            # Short approach (100-150)
+            if hasattr(player_approach, 'sg_100_150') and course_profile.approach_short > 0.3:
+                adjustment = player_approach.sg_100_150 * course_profile.approach_short * 0.4
+                sg_adjustment += adjustment
+
+        elif 'sg_app' in player_decomp:
+            # Fall back to overall approach
+            app_sg = player_decomp['sg_app']
+            avg_approach_weight = (course_profile.approach_long + course_profile.approach_mid + course_profile.approach_short) / 3
+            adjustment = app_sg * avg_approach_weight * 0.4
+            sg_adjustment += adjustment
+            if abs(adjustment) > 0.05:
+                factors.append(f"Approach {'advantage' if adjustment > 0 else 'disadvantage'}")
+
+        # Around-the-green fit
+        if 'sg_arg' in player_decomp and course_profile.around_green > 0.3:
+            arg_sg = player_decomp['sg_arg']
+            adjustment = arg_sg * course_profile.around_green * 0.4
+            sg_adjustment += adjustment
+            if abs(adjustment) > 0.05:
+                factors.append(f"Short game {'strength' if adjustment > 0 else 'weakness'}")
+
+        # Putting fit
+        if 'sg_putt' in player_decomp and course_profile.putting > 0.3:
+            putt_sg = player_decomp['sg_putt']
+            adjustment = putt_sg * course_profile.putting * 0.5
+            sg_adjustment += adjustment
+            if abs(adjustment) > 0.05:
+                factors.append(f"Putting {'advantage' if adjustment > 0 else 'challenge'}")
+
+        explanation = ", ".join(factors) if factors else "Neutral course fit"
+        return sg_adjustment, explanation
+
+    def _get_market_consensus_adjustment(
+        self,
+        golfer_name: str,
+        betting_odds: Dict,
+        model_win_prob: float
+    ) -> Tuple[float, str]:
+        """
+        Compare model prediction vs market odds to find value.
+        If model is higher than market, golfer may be undervalued.
+
+        Returns (multiplier, explanation)
+        """
+        golfer_odds = betting_odds.get(golfer_name, {})
+        if not golfer_odds:
+            return 1.0, ""
+
+        market_win_prob = golfer_odds.get('win', 0)
+        if market_win_prob <= 0:
+            return 1.0, ""
+
+        # Calculate edge: model vs market
+        edge = model_win_prob - market_win_prob
+
+        if edge > 0.03:  # Model sees >3% more win probability than market
+            return 1.08, f"Model edge vs market (+{edge*100:.1f}%)"
+        elif edge < -0.03:  # Market sees golfer as better than model
+            return 0.95, f"Market favors more than model ({edge*100:.1f}%)"
+        else:
+            return 1.0, ""
+
+    def _get_true_skill_adjustment(
+        self,
+        golfer_name: str,
+        dg_rankings: Dict,
+        skill_ratings: Dict
+    ) -> Tuple[float, str]:
+        """
+        Use Data Golf's true skill ratings to adjust for OWGR anomalies.
+        Some golfers are better/worse than their OWGR suggests.
+
+        Returns (multiplier, explanation)
+        """
+        dg_rank = dg_rankings.get(golfer_name, {})
+        skill = skill_ratings.get(golfer_name, {})
+
+        if not dg_rank and not skill:
+            return 1.0, ""
+
+        # Get DG skill estimate
+        dg_skill = dg_rank.get('dg_skill_estimate', 0) if dg_rank else 0
+        owgr = dg_rank.get('owgr', 999) if dg_rank else 999
+
+        # If DG skill suggests player is better than OWGR indicates
+        if dg_skill > 0 and owgr > 30:
+            # Player underrated by OWGR
+            if dg_skill > 1.5:  # Elite skill but not elite OWGR
+                return 1.10, f"DG skill ({dg_skill:.2f}) exceeds OWGR #{owgr}"
+            elif dg_skill > 0.8:
+                return 1.05, f"Undervalued by OWGR (DG: {dg_skill:.2f})"
+
+        # If OWGR is high but DG skill is low
+        if owgr < 30 and dg_skill < 0.5:
+            return 0.95, f"OWGR may overrate (DG: {dg_skill:.2f})"
+
+        return 1.0, ""
 
     def get_current_phase(self, target_date: date = None) -> SeasonPhase:
         """Determine current season phase."""
@@ -1076,6 +1291,15 @@ class Strategy:
 
         logger.info(f"Generating recommendations for {tournament.name}")
 
+        # ENHANCED: Fetch all available API data for better recommendations
+        enhanced_data = self._fetch_enhanced_data(tournament)
+        decompositions = enhanced_data.get('decompositions', {})
+        approach_skill = enhanced_data.get('approach_skill', {})
+        dg_rankings = enhanced_data.get('dg_rankings', {})
+        skill_ratings = enhanced_data.get('skill_ratings', {})
+        betting_odds = enhanced_data.get('betting_odds', {})
+        logger.info(f"Enhanced data loaded: {len(decompositions)} decomps, {len(betting_odds)} odds")
+
         # Get available golfers
         if available_only:
             available_names = self.db.get_available_golfers()
@@ -1236,6 +1460,23 @@ class Strategy:
                 # 0.5 relative = 0.7x, 0.8 relative = 0.88x
                 relative_value_mult = 0.4 + (relative_value * 0.6)
 
+            # ENHANCED: Detailed SG course matching using decomposition data
+            sg_course_match, sg_match_explanation = self._calculate_sg_course_match(
+                golfer.name, tournament, decompositions, approach_skill
+            )
+            # Convert SG match to multiplier (0.5 SG advantage = ~8% EV boost)
+            sg_match_mult = 1.0 + (sg_course_match * 0.16)
+
+            # ENHANCED: Market consensus adjustment (model vs betting odds)
+            market_mult, market_explanation = self._get_market_consensus_adjustment(
+                golfer.name, betting_odds, golfer.win_probability
+            )
+
+            # ENHANCED: True skill adjustment (DG skill vs OWGR)
+            skill_mult, skill_explanation = self._get_true_skill_adjustment(
+                golfer.name, dg_rankings, skill_ratings
+            )
+
             # Final score combines:
             # - Base EV (simulation mean)
             # - Win probability value (don't waste high win% at small events)
@@ -1248,11 +1489,15 @@ class Strategy:
             # - Cut probability penalty (Phase 1.2)
             # - Opposite-field boost (Phase 1.3)
             # - Course history boost (Phase 2.1)
-            # - RELATIVE VALUE (opportunity cost) - NEW
+            # - RELATIVE VALUE (opportunity cost)
+            # - ENHANCED: SG course match (detailed decomposition)
+            # - ENHANCED: Market consensus (model vs odds)
+            # - ENHANCED: True skill (DG skill vs OWGR)
             expected_value = (base_ev * win_prob_multiplier * hedge_bonus * phase_multiplier *
                             elite_save_penalty * course_fit_ev_factor * standings_adjustment *
                             field_strength_mult * cut_penalty * opposite_field_mult *
-                            course_history_boost * relative_value_mult)
+                            course_history_boost * relative_value_mult *
+                            sg_match_mult * market_mult * skill_mult)
 
             # Check OWGR warning
             owgr_warning, owgr_msg = self.check_owgr_warning(golfer)
@@ -1340,6 +1585,10 @@ class Strategy:
                 best_future_event=best_future_event,
                 field_strength=field_strength,
                 course_history_summary=course_history.summary if course_history else "",
+                # ENHANCED: Add new data insights
+                sg_match_explanation=sg_match_explanation,
+                market_explanation=market_explanation,
+                skill_explanation=skill_explanation,
             )
 
             # NEW: Calculate factor contributions (additive model)
@@ -1351,6 +1600,10 @@ class Strategy:
                 hedge_mult=hedge_bonus,
                 phase_mult=phase_multiplier,
                 course_history_boost=course_history_boost,
+                # ENHANCED: Add new factor contributions
+                sg_match_mult=sg_match_mult,
+                market_mult=market_mult,
+                skill_mult=skill_mult,
             )
 
             # NEW: Calculate timing verdict
@@ -1524,12 +1777,18 @@ class Strategy:
         best_future_event: str,
         field_strength: str,
         course_history_summary: str,
+        # ENHANCED: New API data insights
+        sg_match_explanation: str = "",
+        market_explanation: str = "",
+        skill_explanation: str = "",
     ) -> List[str]:
         """Generate 3-5 plain English bullet points explaining the pick."""
         bullets = []
 
-        # 1. Course fit reasoning
-        if course_fit >= 0.3:
+        # 1. Course fit reasoning (enhanced with SG decomposition)
+        if sg_match_explanation:
+            bullets.append(f"Course fit analysis: {sg_match_explanation}")
+        elif course_fit >= 0.3:
             bullets.append(f"Excellent course fit at {tournament.course} (+{course_fit:.2f} SG/round)")
         elif course_fit >= 0.1:
             bullets.append(f"Good course fit at {tournament.course} (+{course_fit:.2f} SG/round)")
@@ -1555,7 +1814,15 @@ class Strategy:
         elif sim.win_rate >= 0.05:
             bullets.append(f"Solid {sim.win_rate*100:.1f}% win probability with {sim.top_10_rate*100:.0f}% top-10 chance")
 
-        # 4. Field strength reasoning
+        # 4. ENHANCED: Market consensus insight
+        if market_explanation:
+            bullets.append(market_explanation)
+
+        # 5. ENHANCED: True skill insight (DG vs OWGR)
+        if skill_explanation:
+            bullets.append(skill_explanation)
+
+        # 6. Field strength reasoning
         if field_strength == "WEAK":
             if golfer.owgr <= 50:
                 bullets.append("Weak field gives mid-tier player strong winning chance")
@@ -1563,13 +1830,13 @@ class Strategy:
             if golfer.owgr <= 20:
                 bullets.append("Strong field favors elite deployment now")
 
-        # 5. Course history reasoning
+        # 7. Course history reasoning
         if course_history_summary and "win" in course_history_summary.lower():
             bullets.append(f"Proven winner here - {course_history_summary}")
         elif course_history_summary and "top-5" in course_history_summary.lower():
             bullets.append(f"Strong course history - {course_history_summary}")
 
-        # 6. Cut probability reasoning
+        # 8. Cut probability reasoning
         if sim.cut_rate >= 0.90:
             bullets.append(f"Very safe pick - {sim.cut_rate*100:.0f}% make cut probability")
         elif sim.cut_rate < 0.75:
@@ -1587,6 +1854,10 @@ class Strategy:
         hedge_mult: float,
         phase_mult: float,
         course_history_boost: float,
+        # ENHANCED: New API-based factors
+        sg_match_mult: float = 1.0,
+        market_mult: float = 1.0,
+        skill_mult: float = 1.0,
     ) -> Dict[str, float]:
         """
         Calculate dollar contribution of each factor.
@@ -1617,6 +1888,18 @@ class Strategy:
         # Course history: up to ±$25K
         history_adj = min(max((course_history_boost - 1.0) * base_ev, -25000), 25000)
         contributions["course_history"] = history_adj
+
+        # ENHANCED: SG decomposition match: up to ±$35K
+        sg_match_adj = min(max((sg_match_mult - 1.0) * base_ev, -35000), 35000)
+        contributions["sg_match"] = sg_match_adj
+
+        # ENHANCED: Market consensus edge: up to ±$20K
+        market_adj = min(max((market_mult - 1.0) * base_ev, -20000), 20000)
+        contributions["market_edge"] = market_adj
+
+        # ENHANCED: True skill adjustment: up to ±$25K
+        skill_adj = min(max((skill_mult - 1.0) * base_ev, -25000), 25000)
+        contributions["true_skill"] = skill_adj
 
         return contributions
 
